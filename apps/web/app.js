@@ -18,12 +18,10 @@ function searchFilters() {
   const city = $('city').value.trim();
   const cohort = $('cohort').value.trim();
   const accepts = $('acceptsOverseas').value;
-  const max = $('maxWrittenBurden').value;
   if (query) params.set('query', query);
   if (city) params.set('city', city);
   if (cohort) params.set('cohort', cohort);
   if (accepts) params.set('accepts_overseas', accepts);
-  if (max !== '') params.set('max_written_test_burden', max);
   return params;
 }
 
@@ -54,7 +52,7 @@ async function loadJobs() {
   const res = await fetch('/api/jobs?' + params.toString());
   const data = await res.json();
   $('count').textContent = `${data.count} 条`;
-  $('jobs').innerHTML = data.items.map(jobCard).join('') || '<p class="subtle">没有匹配岗位</p>';
+  $('jobs').innerHTML = data.items.map(job => jobCard(job)).join('') || '<p class="subtle">没有匹配岗位</p>';
 }
 
 async function runMatch() {
@@ -72,25 +70,51 @@ async function runMatch() {
 
 function jobCard(job, match) {
   const statusClass = match ? matchClass(match.status) : '';
-  const matchTag = match ? `<span class="tag ${statusClass}">${matchLabel(match.status)} ${Math.round(match.score * 100)}%</span>` : '';
+  const matchTag = match ? `<span class="tag ${statusClass}">${matchLabel(match.status)} ${Math.round(match.score * 100)}%</span>` : '<span class="tag">未匹配</span>';
   const process = job.process_rule || {};
   const campaign = job.campaign || {};
   const company = job.company || {};
-  return `<article class="card">
-    <h3>${escapeHtml(job.title)}</h3>
-    <div class="meta">
-      ${matchTag}
-      <span class="tag">${escapeHtml(company.name)}</span>
-      <span class="tag">${escapeHtml(campaign.target_cohort || '未知届别')}</span>
-      <span class="tag">${escapeHtml(campaign.recruitment_type || '未知类型')}</span>
-      <span class="tag">${escapeHtml((job.cities || []).join(' / ') || '城市未知')}</span>
-      <span class="tag ${process.written_test_burden <= 1 ? 'good' : process.written_test_burden >= 4 ? 'bad' : 'warn'}">笔试负担 ${process.written_test_burden ?? 5}</span>
-      <span class="tag">来源 ${escapeHtml(job.source_level || 'C')}</span>
+  const companyName = company.name || '未知公司';
+  const cityText = (job.cities || []).join(' / ') || '城市未知';
+  const deadline = campaign.deadline || '未知';
+  const degree = degreeLabel(job.degree_min || campaign.degree_min || '');
+  const burden = Number(process.written_test_burden ?? 5);
+  const burdenClass = burden <= 1 ? 'good' : burden >= 4 ? 'bad' : 'warn';
+  const applyUrl = job.apply_url || job.source_url || campaign.apply_url || campaign.source_url || '';
+  const sourceUrl = job.source_url || campaign.source_url || '';
+  const sourceAction = sourceUrl && sourceUrl !== applyUrl ? `<a class="button ghost" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener">原文</a>` : '';
+  return `<article class="card job-card">
+    <div class="job-main">
+      <div class="job-topline">
+        <div class="job-title-block">
+          <div class="job-title-row">
+            <h3 class="job-title">${escapeHtml(job.title || '待命名岗位')}</h3>
+            ${matchTag}
+          </div>
+          <p class="job-company">${escapeHtml(companyName)}<span>${escapeHtml(campaign.name || '未知招聘项目')}</span></p>
+        </div>
+        <div class="job-deadline">
+          <span>截止</span>
+          <strong>${escapeHtml(deadline)}</strong>
+        </div>
+      </div>
+      <div class="job-facts">
+        <span>${escapeHtml(cityText)}</span>
+        <span>${escapeHtml(campaign.target_cohort || '未知届别')}</span>
+        <span>${escapeHtml(campaign.recruitment_type || '未知类型')}</span>
+        <span>${escapeHtml(degree)}</span>
+        <span class="${burdenClass}">笔试负担 ${escapeHtml(burden)}</span>
+        <span>来源 ${escapeHtml(job.source_level || 'C')}</span>
+      </div>
+      <p class="job-description">${escapeHtml(job.description || '暂无岗位说明，建议打开原文复核。')}</p>
+      <p class="subtle">海外：${campaign.accepts_overseas === true ? '接受' : campaign.accepts_overseas === false ? '未显示接受' : '未知'}</p>
+      ${match ? renderMatch(match) : ''}
     </div>
-    <p>${escapeHtml(job.description || '')}</p>
-    <p class="subtle">截止：${escapeHtml(campaign.deadline || '未知')} ｜ 海外：${campaign.accepts_overseas === true ? '接受' : campaign.accepts_overseas === false ? '未显示接受' : '未知'}</p>
-    ${match ? renderMatch(match) : ''}
-    <button onclick="showDetail(${job.id})">查看证据和变化</button>
+    <div class="job-actions">
+      ${applyUrl ? `<a class="button primary" href="${escapeHtml(applyUrl)}" target="_blank" rel="noopener">去申请</a>` : ''}
+      ${sourceAction}
+      <button class="ghost" onclick="showDetail(${job.id})">证据</button>
+    </div>
   </article>`;
 }
 
@@ -144,6 +168,14 @@ function matchClass(status) {
 function matchLabel(status) {
   return { eligible: '可投', maybe: '可能可投', not_eligible: '不适合', unknown: '未知' }[status] || status;
 }
+function degreeLabel(value) {
+  return {
+    associate: '专科',
+    bachelor: '本科',
+    master: '硕士',
+    phd: '博士',
+  }[value] || value || '学历未知';
+}
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[ch]));
 }
@@ -161,6 +193,7 @@ function showResult(id, value) {
   el.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 }
 function formatAutoImportResult(data) {
+  const jobMap = new Map((data.jobs || []).map(job => [String(job.id), job]));
   const lines = [
     `搜索词：${data.keyword || ''}`,
     `信息源：${sourceScopeLabel(data.source_scope || 'all')}`,
@@ -178,13 +211,24 @@ function formatAutoImportResult(data) {
       if (item.imported) {
         const type = item.candidate_type === 'wechat_article' ? '公众号文章' : '招聘信号';
         lines.push(`  已导入${type}：${item.canonical_url}`);
-        if ((item.job_ids || []).length) lines.push(`    已生成岗位 ID：${item.job_ids.join(', ')}`);
+        const summaries = (item.job_ids || []).map(id => jobMap.get(String(id))).filter(Boolean);
+        if (summaries.length) {
+          lines.push('    已生成岗位：');
+          for (const job of summaries) lines.push(`      ${formatImportedJob(job)}`);
+        } else if ((item.job_ids || []).length) {
+          lines.push(`    已生成岗位 ID：${item.job_ids.join(', ')}`);
+        }
       } else if (item.error) {
         lines.push(`  未导入：${item.canonical_url || item.url} ｜ ${item.error}`);
       }
     }
   }
   return lines.join('\n');
+}
+function formatImportedJob(job) {
+  const city = (job.cities || []).join(' / ') || '城市未知';
+  const deadline = job.deadline || '截止未知';
+  return `${job.title || '待命名岗位'} ｜ ${job.company_name || '未知公司'} ｜ ${city} ｜ ${deadline}`;
 }
 function sourceScopeLabel(value) {
   return {

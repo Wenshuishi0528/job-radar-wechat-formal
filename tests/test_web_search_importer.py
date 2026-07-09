@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from services.api.app.database import init_db
+from services.api.app.repository import import_scraped_job, list_jobs
 from services.api.app.web_search_importer import (
     WebSearchCandidate,
     WebSearchImportError,
@@ -86,6 +87,41 @@ CHNENERGY_JOBS_HTML = """
 <div>招聘人数：1</div>
 <div>申请</div>
 <div>报名截止日期：2026-05-21</div>
+</body></html>
+"""
+
+CHNENERGY_ANNC_LIST_HTML = """
+<html><body>
+<ul class="list-group">
+  <li class="list-group-item"><a href="/annc/showgg?id=notice">国家能源集团2026年度高校毕业生春季招聘笔试通知</a></li>
+  <li class="list-group-item"><a href="/annc/showgg?id=direct">国家能源投资集团有限责任公司2026年高校毕业生直招公告</a></li>
+</ul>
+</body></html>
+"""
+
+CHNENERGY_ANNC_DETAIL_HTML = """
+<html><body>
+<p class="lead text-center">国家能源投资集团有限责任公司2026年高校毕业生直招公告</p>
+<div id="anncTxt"><p>面向国家能源集团所属单位招聘高校毕业生。</p></div>
+<a href="/annc/showggStationList?id=direct">招聘职位列表</a>
+</body></html>
+"""
+
+CHNENERGY_STATION_LIST_HTML = """
+<html><body>
+<ul class="list-group">
+  <li class="list-group-item">
+    <h4 class="list-group-item-heading">
+      <a href="/annc/showgw?id=job1" target="_self" class="showNewpage" title="AI算法研究员">AI算法研究员</a>
+      <span class="pull-right"><small>科研</small></span>
+    </h4>
+    <p class="list-group-item-text">
+      <span title="国能数智科技开发（北京）有限公司本部">国能数智科技开发（北京）有限公司本部</span>
+      &nbsp;|&nbsp; <span title="电子信息类相关专业,计算机类相关专业,信息与通信工程类相关专业">电子信息类相关专业,计算机类相关专业,信...</span>
+      &nbsp;|&nbsp; 博士研究生 &nbsp;|&nbsp; 北京 &nbsp;|&nbsp; 2人
+    </p>
+  </li>
+</ul>
 </body></html>
 """
 
@@ -174,6 +210,33 @@ class PlainWebSearchImporterTest(unittest.TestCase):
         self.assertEqual(jobs[0]["degree_min"], "master")
         self.assertEqual(jobs[0]["deadline"], "2026-05-21")
 
+    def test_extract_jobs_from_chnenergy_station_list(self):
+        jobs = extract_jobs_from_html(
+            CHNENERGY_STATION_LIST_HTML,
+            source_url="https://zhaopin.chnenergy.com.cn/annc/showggStationList?id=direct",
+            default_company="国家能源集团",
+        )
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["title"], "AI算法研究员")
+        self.assertEqual(jobs[0]["company_name"], "国能数智科技开发（北京）有限公司本部")
+        self.assertEqual(jobs[0]["degree_min"], "phd")
+        self.assertEqual(jobs[0]["cities"], ["北京"])
+
+    def test_job_search_expands_china_energy_alias(self):
+        import_scraped_job({
+            "company_name": "国能数智科技开发（北京）有限公司本部",
+            "title": "AI算法研究员",
+            "campaign_name": "国家能源集团 校园招聘",
+            "recruitment_type": "校招",
+            "cities": ["北京"],
+            "degree_min": "phd",
+            "source_url": "https://zhaopin.chnenergy.com.cn/annc/showgw?id=job1",
+            "apply_url": "https://zhaopin.chnenergy.com.cn/annc/showgw?id=job1",
+        })
+        jobs = list_jobs({"query": "中国能源集团", "limit": 10})
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["title"], "AI算法研究员")
+
     def test_parse_rejects_verification_pages(self):
         with self.assertRaises(WebSearchImportError):
             parse_search_results("google", "<html>Our systems have detected unusual traffic captcha</html>")
@@ -261,6 +324,29 @@ class PlainWebSearchImporterTest(unittest.TestCase):
         self.assertGreaterEqual(result["jobs_imported"], 2)
         imported_items = [item for item in result["providers"][0]["items"] if item["job_ids"]]
         self.assertTrue(imported_items)
+        self.assertGreaterEqual(len(result["jobs"]), 2)
+        self.assertEqual(result["jobs"][0]["title"], "人力专责")
+        self.assertEqual(result["jobs"][0]["company_name"], "中国神华煤制油化工有限公司销售分公司")
+        self.assertEqual(result["jobs"][0]["cities"], ["内蒙古包头"])
+        self.assertEqual(result["jobs"][0]["deadline"], "2026-05-21")
+
+    def test_auto_search_import_follows_chnenergy_announcement_to_station_list(self):
+        def fake_open(request, timeout=15):
+            url = request.full_url
+            if "annclist" in url:
+                return FakeResponse(CHNENERGY_ANNC_LIST_HTML)
+            if "showggStationList" in url:
+                return FakeResponse(CHNENERGY_STATION_LIST_HTML)
+            if "showgg?id=direct" in url:
+                return FakeResponse(CHNENERGY_ANNC_DETAIL_HTML)
+            return FakeResponse("<html></html>")
+
+        with patch("services.api.app.web_search_importer.fetch_search_results", return_value=[]):
+            with patch("services.api.app.web_search_importer._open_url", side_effect=fake_open):
+                result = auto_search_and_import("中国能源集团 校招", provider="google", source_scope="official", freshness_days=45, max_results=3)
+        self.assertGreaterEqual(result["jobs_imported"], 1)
+        self.assertEqual(result["jobs"][0]["title"], "AI算法研究员")
+        self.assertEqual(result["jobs"][0]["company_name"], "国能数智科技开发（北京）有限公司本部")
 
 
 if __name__ == "__main__":

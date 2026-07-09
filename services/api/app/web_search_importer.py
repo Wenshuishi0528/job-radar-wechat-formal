@@ -15,7 +15,7 @@ from typing import Any
 
 from .database import get_connection
 from .extraction import CITY_KEYWORDS, infer_job_family
-from .repository import import_scraped_job
+from .repository import get_job, import_scraped_job
 from .wechat_articles import (
     MP_HOST,
     WECHAT_URL_RE,
@@ -33,6 +33,7 @@ SOURCE_SCOPES = {"all", "official", "job_boards", "open_web", "university", "wec
 SEARCH_ENGINE_HOSTS = {
     "google.com", "www.google.com", "bing.com", "www.bing.com", "weixin.sogou.com", "sogou.com", "www.sogou.com",
 }
+CHNENERGY_RECRUIT_HOST = "zhaopin.chnenergy.com.cn"
 STATIC_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".css", ".js", ".ico", ".zip")
 RECRUITING_TERMS = "(校园招聘 OR 校招 OR 秋招 OR 春招 OR 暑期实习 OR 实习 OR 应届 OR 内推 OR 宣讲会)"
 OFFICIAL_RECRUITING_DOMAINS = [
@@ -383,17 +384,19 @@ def _html_to_lines(value: str) -> list[str]:
     return [line for line in lines if line and line not in {"|", "-->"}]
 
 
-def _extract_href_candidates(provider: str, html_text: str) -> list[tuple[str, str]]:
-    base_url = "https://www.google.com" if provider == "google" else "https://www.bing.com"
-    candidates: list[tuple[str, str]] = []
+def _extract_links(html_text: str, base_url: str) -> list[tuple[str, str]]:
+    links: list[tuple[str, str]] = []
     for match in re.finditer(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', html_text or "", flags=re.I | re.S):
-        href = match.group(1)
-        href = html.unescape(href)
+        href = html.unescape(match.group(1))
         if href.startswith("#") or href.startswith("javascript:"):
             continue
-        full = urllib.parse.urljoin(base_url, href)
-        candidates.append((full, _text_from_html(match.group(2))))
-    return candidates
+        links.append((urllib.parse.urljoin(base_url, href), _text_from_html(match.group(2))))
+    return links
+
+
+def _extract_href_candidates(provider: str, html_text: str) -> list[tuple[str, str]]:
+    base_url = "https://www.google.com" if provider == "google" else "https://www.bing.com"
+    return _extract_links(html_text, base_url)
 
 
 def _degree_from_text(value: str) -> str:
@@ -431,7 +434,81 @@ def _is_job_title_candidate(value: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fffA-Za-z]", value))
 
 
+def _extract_attr(value: str, attr: str) -> str:
+    match = re.search(rf'\b{re.escape(attr)}=["\']([^"\']+)["\']', value or "", flags=re.I)
+    return html.unescape(match.group(1)).strip() if match else ""
+
+
+def _extract_chnenergy_station_jobs(html_text: str, source_url: str, default_company: str, source_level: str, max_jobs: int) -> list[dict[str, Any]]:
+    jobs: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for block_match in re.finditer(r'<li\b[^>]*class=["\'][^"\']*list-group-item[^"\']*["\'][^>]*>(.*?)</li>', html_text or "", flags=re.I | re.S):
+        block = block_match.group(1)
+        link_match = re.search(r'<a\b([^>]*)href=["\']([^"\']*?/annc/showgw\?id=[^"\']+)["\']([^>]*)>(.*?)</a>', block, flags=re.I | re.S)
+        if not link_match:
+            continue
+        attrs = f"{link_match.group(1)} {link_match.group(3)}"
+        title = _extract_attr(attrs, "title") or _text_from_html(link_match.group(4))
+        if not _is_job_title_candidate(title):
+            continue
+        span_titles = re.findall(r'<span\b[^>]*title=["\']([^"\']+)["\'][^>]*>', block, flags=re.I | re.S)
+        span_titles = [html.unescape(item).strip() for item in span_titles if html.unescape(item).strip()]
+        if len(span_titles) < 2:
+            continue
+        company_name = span_titles[0]
+        majors_text = span_titles[1] if len(span_titles) > 1 else ""
+        text = _text_from_html(block)
+        parts = [part.strip(" \u00a0") for part in re.split(r"\s*\|\s*", text) if part.strip(" \u00a0")]
+        degree_text = ""
+        city_text = ""
+        for idx, part in enumerate(parts):
+            if any(token in part for token in ["博士", "硕士", "研究生", "本科", "专科", "大专"]):
+                degree_text = part
+                if idx + 1 < len(parts):
+                    city_text = parts[idx + 1]
+                break
+        if not majors_text:
+            for part in parts:
+                if "专业" in part or "工程" in part or "计算机" in part:
+                    majors_text = part
+                    break
+        job_url = urllib.parse.urljoin(source_url, html.unescape(link_match.group(2)))
+        key = (company_name, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        block_text = " / ".join([part for part in [title, company_name, majors_text, degree_text, city_text] if part])
+        jobs.append({
+            "company_name": company_name or default_company,
+            "company_aliases": [default_company] if default_company and default_company != company_name else [],
+            "industry": "能源央企" if "能源" in default_company or "国能" in company_name else "unknown",
+            "title": title,
+            "campaign_name": f"{default_company} 校园招聘" if default_company != "未知公司" else "自动搜索校园招聘",
+            "recruitment_type": "校招",
+            "deadline": None,
+            "degree_min": _degree_from_text(degree_text),
+            "cities": _cities_from_text(city_text),
+            "majors": [part for part in re.split(r"[,，、]", majors_text) if part],
+            "job_family": infer_job_family(title, block_text),
+            "description": block_text[:500],
+            "source_url": source_url,
+            "apply_url": job_url,
+            "source_level": source_level,
+            "quality_score": 0.82,
+            "risk_level": "needs_review",
+            "evidence_text": block_text[:600],
+            "confidence": 0.8,
+        })
+        if len(jobs) >= max_jobs:
+            break
+    return jobs
+
+
 def extract_jobs_from_html(html_text: str, source_url: str, default_company: str = "未知公司", source_level: str = "A", max_jobs: int = 20) -> list[dict[str, Any]]:
+    station_jobs = _extract_chnenergy_station_jobs(html_text, source_url, default_company, source_level, max_jobs)
+    if station_jobs:
+        return station_jobs
+
     lines = _html_to_lines(html_text)
     jobs: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -769,30 +846,108 @@ def _should_fetch_jobs(candidate: WebSearchCandidate) -> bool:
     return any(token in host_path for token in ["zhaopin", "career", "careers", "campus", "job", "recruit", "hotjob"])
 
 
-def _import_jobs_from_candidate(candidate: WebSearchCandidate) -> list[int]:
-    if not _should_fetch_jobs(candidate):
-        return []
-    if candidate.canonical_url.lower().endswith(".pdf"):
-        return []
+def _fetch_job_page_html(url: str, timeout: int = 14) -> str:
     request = urllib.request.Request(
-        candidate.canonical_url,
+        url,
         headers={
             "User-Agent": os.getenv("JOB_RADAR_BROWSER_USER_AGENT", "Mozilla/5.0 JobRadar personal local job extractor"),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         },
     )
-    with _open_url(request, timeout=20) as response:
+    with _open_url(request, timeout=timeout) as response:
         charset = response.headers.get_content_charset() or "utf-8"
-        body = response.read().decode(charset, errors="replace")
+        return response.read().decode(charset, errors="replace")
+
+
+def _is_chnenergy_recruit_url(url: str) -> bool:
+    return urllib.parse.urlparse(url).netloc.lower().endswith(CHNENERGY_RECRUIT_HOST)
+
+
+def _chnenergy_link_priority(url: str, title: str) -> int:
+    if "/annc/showggStationList" in url:
+        return 0
+    title = title or ""
+    if "笔试" in title or "通知" in title:
+        return 8
+    if "直招" in title or "春季招聘" in title:
+        return 1
+    if "高校毕业生" in title:
+        return 2
+    if "专项招聘" in title or "乡村振兴" in title:
+        return 3
+    if "社会招聘" in title:
+        return 6
+    return 5
+
+
+def _extract_chnenergy_follow_urls(html_text: str, base_url: str, limit: int = 8) -> list[str]:
+    ranked: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for order, (url, title) in enumerate(_extract_links(html_text, base_url)):
+        if not _is_chnenergy_recruit_url(url):
+            continue
+        if "/annc/showggStationList" not in url and "/annc/showgg?" not in url:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        ranked.append((_chnenergy_link_priority(url, title), order, url))
+    ranked.sort()
+    return [url for _, _, url in ranked[:limit]]
+
+
+def _linked_job_pages(start_url: str, html_text: str, max_pages: int = 8) -> list[tuple[str, str]]:
+    if not _is_chnenergy_recruit_url(start_url):
+        return []
+    pages: list[tuple[str, str]] = []
+    seen = {start_url}
+    queue = _extract_chnenergy_follow_urls(html_text, start_url, limit=max_pages)
+    while queue and len(pages) < max_pages:
+        url = queue.pop(0)
+        if url in seen:
+            continue
+        seen.add(url)
+        try:
+            body = _fetch_job_page_html(url, timeout=12)
+        except Exception:
+            continue
+        pages.append((url, body))
+        nested = [item for item in _extract_chnenergy_follow_urls(body, url, limit=max_pages) if item not in seen]
+        station_urls = [item for item in nested if "/annc/showggStationList" in item]
+        detail_urls = [item for item in nested if "/annc/showgg?" in item]
+        queue = station_urls + queue + detail_urls
+    return pages
+
+
+def _import_jobs_from_candidate(candidate: WebSearchCandidate) -> list[int]:
+    if not _should_fetch_jobs(candidate):
+        return []
+    if candidate.canonical_url.lower().endswith(".pdf"):
+        return []
+    body = _fetch_job_page_html(candidate.canonical_url, timeout=16)
     default_company = _official_source_name_for_url(candidate.canonical_url) or candidate.title or "未知公司"
-    jobs = extract_jobs_from_html(
-        body,
-        source_url=candidate.canonical_url,
-        default_company=default_company,
-        source_level=_source_level_for_scope(candidate.source_scope, candidate.canonical_url),
-        max_jobs=20,
-    )
+    source_level = _source_level_for_scope(candidate.source_scope, candidate.canonical_url)
+    pages = [(candidate.canonical_url, body), *_linked_job_pages(candidate.canonical_url, body)]
+    jobs: list[dict[str, Any]] = []
+    seen_jobs: set[tuple[str, str]] = set()
+    for page_url, page_body in pages:
+        for job in extract_jobs_from_html(
+            page_body,
+            source_url=page_url,
+            default_company=default_company,
+            source_level=source_level,
+            max_jobs=20,
+        ):
+            key = (job.get("company_name") or "", job.get("title") or "")
+            if key in seen_jobs:
+                continue
+            seen_jobs.add(key)
+            jobs.append(job)
+            if len(jobs) >= 20:
+                break
+        if len(jobs) >= 20:
+            break
     job_ids: list[int] = []
     seen_job_ids: set[int] = set()
     for job in jobs:
@@ -802,6 +957,37 @@ def _import_jobs_from_candidate(candidate: WebSearchCandidate) -> list[int]:
             seen_job_ids.add(job_id)
             job_ids.append(job_id)
     return job_ids
+
+
+def _job_summary(job_id: int) -> dict[str, Any] | None:
+    job = get_job(job_id)
+    if not job:
+        return None
+    return {
+        "id": job["id"],
+        "title": job["title"],
+        "company_name": (job.get("company") or {}).get("name") or "未知公司",
+        "cities": job.get("cities") or [],
+        "deadline": (job.get("campaign") or {}).get("deadline"),
+        "campaign_name": (job.get("campaign") or {}).get("name"),
+        "apply_url": job.get("apply_url"),
+        "source_url": job.get("source_url"),
+        "source_level": job.get("source_level"),
+    }
+
+
+def _collect_job_summaries(items: list[WebSearchCandidate]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for item in items:
+        for job_id in item.job_ids or []:
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            summary = _job_summary(job_id)
+            if summary:
+                summaries.append(summary)
+    return summaries
 
 
 def auto_search_and_import(keyword: str, provider: str = "all", freshness_days: int = 45, max_results: int = 10, source_scope: str = "all") -> dict[str, Any]:
@@ -828,13 +1014,13 @@ def auto_search_and_import(keyword: str, provider: str = "all", freshness_days: 
             all_items.extend(catalog_items)
             provider_results.append({
                 "provider": "official_catalog",
-            "run_id": run_id,
-            "count": len(catalog_items),
-            "imported": len([item for item in catalog_items if item.imported]),
-            "jobs_imported": sum(len(item.job_ids or []) for item in catalog_items),
-            "error": provider_error,
-            "items": [asdict(item) for item in catalog_items],
-        })
+                "run_id": run_id,
+                "count": len(catalog_items),
+                "imported": len([item for item in catalog_items if item.imported]),
+                "jobs_imported": sum(len(item.job_ids or []) for item in catalog_items),
+                "error": provider_error,
+                "items": [asdict(item) for item in catalog_items],
+            })
     for name in providers:
         run_id = _record_run(name, keyword, freshness_days)
         items: list[WebSearchCandidate] = []
@@ -868,6 +1054,7 @@ def auto_search_and_import(keyword: str, provider: str = "all", freshness_days: 
         "count": len(all_items),
         "imported": len([item for item in all_items if item.imported]),
         "jobs_imported": sum(len(item.job_ids or []) for item in all_items),
+        "jobs": _collect_job_summaries(all_items),
         "providers": provider_results,
         "items": [asdict(item) for item in all_items],
     }

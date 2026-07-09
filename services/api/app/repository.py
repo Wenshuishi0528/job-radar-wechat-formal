@@ -303,15 +303,31 @@ def _base_job_query() -> str:
     """
 
 
+def _expand_job_query_terms(query: str) -> list[str]:
+    terms = [query]
+    compact = "".join(str(query).split()).lower()
+    energy_aliases = ["中国能源集团", "国家能源集团", "国家能源投资集团", "国能集团", "国能"]
+    if any(alias.lower() in compact for alias in ["中国能源集团", "国家能源集团", "国家能源投资集团", "国能集团"]):
+        terms.extend(energy_aliases)
+    deduped: list[str] = []
+    for term in terms:
+        if term and term not in deduped:
+            deduped.append(term)
+    return deduped
+
+
 def list_jobs(filters: dict[str, Any]) -> list[dict[str, Any]]:
     ensure_seed_data()
     clauses = ["1=1"]
     params: list[Any] = []
     query = filters.get("query")
     if query:
-        like = f"%{query}%"
-        clauses.append("(j.title LIKE ? OR c.name LIKE ? OR j.description LIKE ? OR ca.name LIKE ?)")
-        params.extend([like, like, like, like])
+        query_clauses = []
+        for term in _expand_job_query_terms(str(query)):
+            like = f"%{term}%"
+            query_clauses.append("(j.title LIKE ? OR c.name LIKE ? OR j.description LIKE ? OR ca.name LIKE ?)")
+            params.extend([like, like, like, like])
+        clauses.append("(" + " OR ".join(query_clauses) + ")")
     city = filters.get("city")
     if city:
         clauses.append("j.cities_json LIKE ?")
