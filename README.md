@@ -1,178 +1,148 @@
-# Job Radar MVP 校招雷达 MVP
+# Job Radar 校招雷达
 
-版本：0.6.0
+版本：0.7.0
 日期：2026-07-09
 
-这是一个可运行的个人本地校招信息雷达。当前版本把搜索范围从“微信公众号文章源”扩展为多来源岗位搜索：企业招聘官网、招聘平台、开源/社区讨论、高校就业网和公众号文章都可以进入同一套本地流程。系统会先发现来源，再抓取公开招聘页面，抽取岗位字段，写入岗位库，并按用户画像匹配排序。Google、Bing 和搜狗微信只是搜索通道，不需要第三方搜索 API。
+Job Radar 是面向个人本地使用的校招机会聚合工具。输入“秋招”“实习”“国家能源集团”等条件后，页面会先显示本地已有结果，再自动联网刷新，并把具体岗位和只能确认到招聘项目的公告统一整理成可筛选、可排序的“网申表格”。
 
-当前数据仍然是演示数据，不代表实时招聘信息。真实上线时，需要把 Source Registry、账号白名单、编辑后台、OpenSearch 索引和抓取限速补齐。
+普通使用不需要 Google、Bing、搜狗或第三方搜索 API 密钥，也不需要手动导入数据。手动导入只作为特殊页面无法自动解析时的备用入口。
 
-## 傻瓜式启动
+## 一键启动
 
-在 macOS Finder 里双击：
+在 macOS Finder 中双击：
 
 ```text
 START_HERE.command
 ```
 
-它会自动：
+脚本会自动创建 Python 环境、安装依赖、开启个人本地模式、选择可用端口并打开浏览器。默认地址通常是：
 
-1. 创建 `.venv`。
-2. 安装依赖。
-3. 开启个人本地模式。
-4. 开启公开 `mp.weixin.qq.com` 文章 URL 抓取。
-5. 开启普通 Google / Bing / 搜狗微信复合搜索自动导入。
-6. 开启企业官网、招聘平台、开源社区、高校就业网和公众号等多来源发现入口。
-7. 开启搜狗微信发现开关；遇到验证码或反自动化页面会停止，不会绕过。
-8. 自动打开 `http://127.0.0.1:8000` 或下一个可用端口。
+```text
+http://127.0.0.1:8000
+```
 
-使用时保持弹出的 Terminal 窗口打开；关闭窗口或按 `Control-C` 会停止服务。
+保持启动脚本打开的 Terminal 窗口运行；关闭窗口或按 `Control-C` 会停止服务。
+
+## 使用方式
+
+1. 在左侧输入关键词。可使用公司、行业、城市、届别、秋招、春招或实习等条件。
+2. 点击“搜索并刷新”。本地结果会立即出现，联网结果完成后自动合并。
+3. 在右侧“网申机会”表格中排序、筛选并打开官网或公告。
+4. 拖动左右区域之间的分隔条，可以调整设置区与结果区宽度。
+5. “公众号文章”页只显示已经成功采集并校验的公开文章；搜不到时会明确显示空状态，不生成假数据。
+
+页面还提供“24h 最新”“27届热门秋招”“国企央企”“实习”等快捷筛选。默认每天自动刷新一次最近使用的搜索条件。
+
+## 搜索与数据来源
+
+当前主流程按以下顺序工作：
+
+1. 查询本地结构化岗位和招聘项目。
+2. 匹配内置的 58 个官方招聘源，覆盖主要央企、国企、科技公司、银行、公共就业与招聘平台。
+3. 使用 Google News RSS 发现近期中文招聘公告，不需要 API 密钥。
+4. 根据用户选择，用 Google 或 Bing 普通网页搜索补充企业官网、招聘平台、高校就业网、社区和开源来源。
+5. 使用搜狗微信保留公众号专项发现能力。
+6. 抓取公开页面并抽取公司、岗位、招聘批次、届别、城市、截止日期、官网和公告证据。
+7. 依据公司、届别和招聘类型去重，避免同一公告被多个媒体重复占满表格。
+
+搜索结果分为两类：
+
+- `岗位`：页面中已经抽取到明确岗位名称和公司。
+- `招聘项目`：能够确认公司正在招聘，但原页面尚未公开或无法稳定抽取岗位明细。
+
+系统不会把招聘项目伪造成具体岗位。已过截止日期的记录默认隐藏；没有截止日期且没有届别依据的旧记录显示为“待确认”。
+
+Google、Bing 和搜狗可能因为地区、验证码、动态页面或搜索服务限制返回较少结果。系统不会绕过验证码、登录或网站访问控制；失败时保留本地结果，并在页面显示具体来源错误。
+
+## 主要能力
+
+- 单一搜索入口，同时完成本地查询和联网刷新。
+- 网申表格展示公司、岗位/项目、批次、城市、截止日期、来源等级和操作入口。
+- 关键词、城市、届别、批次、企业类型、行业、来源等级、新鲜度和过期状态筛选。
+- 表格列排序、左右面板拖拽、桌面与手机响应式布局。
+- 用户画像匹配，保留毕业时间、学历、目标城市和笔试偏好判断。
+- 招聘公告文本结构化导入，作为自动搜索失败时的备用工具。
+- 公众号公开文章解析、去重、质量分、新鲜度和搜狗微信发现。
+- 来源证据、招聘变更记录和过期状态维护。
+- 启动时清理旧版演示数据，不再自动生成示例岗位或示例公众号文章。
 
 ## 手动启动
 
 ```bash
-cd job-radar-wechat-formal
+cd /Users/apple/Downloads/job-radar-wechat-formal
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-ENABLE_WECHAT_PUBLIC_FETCH=1 JOB_RADAR_PERSONAL_MODE=1 uvicorn services.api.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-打开：
-
-```text
-http://localhost:8000
+JOB_RADAR_PERSONAL_MODE=1 \
+ENABLE_WEB_SEARCH_IMPORT=1 \
+ENABLE_WECHAT_PUBLIC_FETCH=1 \
+ENABLE_SOGOU_DISCOVERY=1 \
+uvicorn services.api.main:app --host 127.0.0.1 --port 8000
 ```
 
 API 文档：
 
 ```text
-http://localhost:8000/docs
+http://127.0.0.1:8000/docs
 ```
 
 运行测试：
 
 ```bash
-python -m unittest discover -s tests
+.venv/bin/python -m unittest discover -s tests
+node --check apps/web/app.js
 ```
 
-## 已实现功能
-
-### 校招雷达
-
-1. 岗位搜索。支持关键词、城市、届别、是否接受海外、笔试负担上限等条件。
-2. 用户画像匹配。输入毕业年月、学校地区、学历、目标城市和笔试偏好后，返回可投、可能可投、不适合或未知。
-3. 笔试状态分类。支持免笔试、无统一笔试、岗位特定笔试、在线测评、明确笔试和未知。
-4. 招聘信号雷达。信号和正式岗位分开，避免把“有动静”误写成“已开放”。
-5. 证据字段。每个关键判断可以绑定原文片段、来源 URL 和置信度。
-6. 文本导入。后台可以粘贴公告文本，系统做基础结构化提取并生成招聘项目和岗位。
-7. 变更检测。导入同一公司项目时，会记录截止日期、毕业时间、笔试规则等关键字段变化。
-8. 静态前端。左侧是自动搜索、画像和筛选设置，右侧是招聘信号、岗位和公众号文章结果列表；左右宽度可以用鼠标拖拽调整。
-
-### 多来源自动搜索与岗位匹配
-
-1. 支持信息源范围：综合、企业官网、招聘平台、开源/社区、高校就业网、公众号。
-2. 支持搜索通道：全部通道、Google + Bing、Google、Bing、搜狗微信。
-3. 内置一批常见央企/国企官方招聘入口候选，例如国家能源集团、国家电网、南方电网、中国能建、中国大唐和中国电建。
-4. 公开招聘页面会被抓取并抽取岗位名、公司/单位、城市、学历、专业、截止日期和来源证据。
-5. 抽取出的岗位会写入 `jobs` 并进入右侧“岗位”列表，前端会自动按用户画像跑匹配。
-6. 没有抽出岗位的网页仍进入 `signals`，状态为 `pending_review`，不会直接伪造成正式岗位。
-7. 公众号文章结果会进入公众号文章索引，保留来源、质量分、新鲜度分和规范化 URL。
-8. Google/Bing 走普通网页搜索结果页；搜狗微信只作为公众号专项补充通道。
-9. 遇到验证码、登录确认或异常流量页面会停止并提示，不做绕过。
-
-### 微信公众号文章源
-
-1. 新增公众号文章表、来源表、账号信任表、发现任务表和候选表。
-2. 支持解析已知公开文章 HTML，提取标题、公众号名、发布时间、摘要、封面、正文、图片和规范化 URL。
-3. 支持文章入库、URL 去重、内容 hash、来源等级、质量分、新鲜度分和低质来源屏蔽。
-4. 支持本地文章搜索 API，默认过滤已知过期文章。
-5. 支持解析搜狗微信搜索结果 HTML，生成候选 URL，并对旧文章标记 stale。
-6. 支持授权公众号官方 API 的代码骨架。该路径只用于同步自己授权公众号的已发布文章，不是全网搜索。
-7. 前端保留“公众号文章”结果页，可查看被导入的公开公众号文章索引。
-8. 外部网络访问默认关闭。需要显式设置环境变量后才会抓公开文章或访问搜狗搜索。
-9. 个人启动脚本会为本机使用开启公开文章 URL 抓取、网页搜索自动导入和搜狗发现开关；Google/Bing/搜狗微信都不需要搜索 API。
-
-## 项目结构
-
-```text
-job-radar-wechat-formal/
-  apps/web/                         # 静态前端
-  docs/wechat-article-source.md      # 公众号文章源设计说明
-  services/api/                      # FastAPI 服务
-  services/api/app/                  # 核心业务代码
-  services/api/app/wechat_articles.py
-  services/api/app/wechat_official_api.py
-  services/api/app/external_search_adapters.py
-  services/worker/                   # 数据源监控 worker 骨架
-  tests/                             # 单元测试
-  HANDOFF.md                         # 交接说明
-  CHANGELOG.md                       # 更新记录
-  CODEX_TASKS.md                     # 后续给 Codex 的任务清单
-```
-
-## API 入口
+## 主要 API
 
 ```text
 GET  /api/health
-GET  /api/signals
+GET  /api/opportunities
 GET  /api/jobs
 GET  /api/jobs/{job_id}
 POST /api/jobs/auto-search
 POST /api/match
 POST /api/admin/import-text
 GET  /api/changes
+GET  /api/sources/registry
 
 GET  /api/wechat/articles
 GET  /api/wechat/articles/{article_id}
-POST /api/wechat/ingest-html
 POST /api/wechat/ingest-url
 POST /api/wechat/auto-search-import
 GET  /api/wechat/search-links
 GET  /api/wechat/config
-GET  /api/wechat/discovery-runs
-GET  /api/wechat/sources
 ```
 
-## 环境变量
-
-默认情况下，公众号外部访问都关闭。
+## 项目结构
 
 ```text
-JOB_RADAR_DB=services/api/data/job_radar.sqlite3
-JOB_RADAR_PERSONAL_MODE=1
-ENABLE_WECHAT_PUBLIC_FETCH=0
-ENABLE_WEB_SEARCH_IMPORT=1
-ENABLE_SOGOU_DISCOVERY=0
-SOGOU_REQUEST_DELAY_SECONDS=2.0
-WEB_SEARCH_REQUEST_DELAY_SECONDS=1.0
-JOB_RADAR_USER_AGENT=JobRadar/0.6 personal-local-use no-login-cookie contact=operator
+apps/web/                               静态前端
+services/api/main.py                    FastAPI 入口
+services/api/app/repository.py          岗位、项目、证据和统一查询
+services/api/app/source_registry.py     官方来源注册表
+services/api/app/web_search_importer.py 联网发现、解析、导入和去重
+services/api/app/wechat_articles.py     公众号文章索引
+services/worker/                        后续定时监控任务
+tests/                                  单元测试
+HANDOFF.md                              维护说明
+CHANGELOG.md                            版本记录
 ```
 
-Google、Bing 和搜狗微信都走普通搜索，不需要 API 密钥。页面会自动提取搜索结果中的公开招聘相关页面和公众号文章：普通网页进入招聘信号库，公众号文章进入文章索引。遇到验证码、登录确认或异常流量页面时会停止并提示，不做绕过。
+## 本地数据与边界
 
-开启联网抓取前应先确认目标站点规则、访问频控、错误重试和人工审核流程。
+数据默认保存在：
 
-## 数据设计原则
+```text
+services/api/data/job_radar.sqlite3
+```
 
-不要把“发现信号”直接标成“岗位开放”。Signal 只代表有动静，JobPosting 才代表可展示岗位。
+当前版本适合个人本地使用，不是高并发招聘平台。全网招聘信息没有统一开放接口，搜索覆盖率会受到网页可访问性、动态渲染、搜索收录和来源更新速度影响，因此“全网”应理解为多来源尽量覆盖，而不是保证抓到互联网中的每一个岗位。
 
-不要只保存一个“接受海外留学生”布尔值。海外毕业时间范围、国内毕业时间范围和证据都要保存。
-
-不要只保存“是否笔试”。要保存 written_test_status、written_test_burden、process_text、confidence 和 evidence。
-
-公众号文章不要直接当招聘事实。文章是线索，进入招聘项目和岗位库前需要来源等级、发布时间、新鲜度、账号可信度和人工复核。
-
-## 下一步建议
-
-第一步接入真实数据源时，不要从全网爬虫开始。先接 50 到 100 个高价值官方公众号、公司招聘官网、高校就业网和公共就业平台。
-
-第二步做编辑后台。新信号、低置信度解析、冲突信息、用户反馈、疑似关闭岗位和低质文章都应该进入人工审核队列。
-
-第三步接 OpenSearch 或 Elasticsearch。SQLite 的 LIKE 搜索只能做本地 MVP，正式版需要中文分词、时间排序、账号权重和来源质量排序。
+不要向程序提供个人微信 Cookie、登录令牌、验证码或招聘网站账号。公众号与普通网页内容都作为可追溯信息源，最终投递前应以企业官网为准。
 
 ## 许可证
 
 本项目以 Creative Commons Attribution-NonCommercial 4.0 International（CC BY-NC 4.0）发布。
 
-你可以复制、分享、修改和基于本项目继续开发，但必须保留署名，并且不得用于商业用途。完整条款见 `LICENSE`。
+你可以复制、分享、修改和继续开发，但必须保留署名，并且不得用于商业用途。完整条款见 `LICENSE`。

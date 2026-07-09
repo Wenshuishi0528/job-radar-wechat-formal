@@ -11,7 +11,17 @@ from fastapi.staticfiles import StaticFiles
 
 from .app.extraction import extract_notice
 from .app.matchers import match_job
-from .app.repository import ensure_seed_data, get_job, import_notice, list_changes, list_jobs, list_signals
+from .app.repository import (
+    ensure_seed_data,
+    get_job,
+    import_notice,
+    list_changes,
+    list_jobs,
+    list_opportunities,
+    list_signals,
+    refresh_expired_statuses,
+    remove_demo_data,
+)
 from .app.schemas import (
     ImportTextRequest,
     MatchRequest,
@@ -22,6 +32,7 @@ from .app.schemas import (
 )
 
 from .app.web_search_importer import auto_search_and_import, build_plain_search_url
+from .app.source_registry import registry_items
 from .app.wechat_articles import (
     build_sogou_search_url,
     discover_sogou,
@@ -35,9 +46,9 @@ from .app.wechat_articles import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = PROJECT_ROOT / "apps" / "web"
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 
-app = FastAPI(title="Job Radar MVP", version=APP_VERSION)
+app = FastAPI(title="Job Radar 校招雷达", version=APP_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -50,6 +61,8 @@ app.add_middleware(
 @app.on_event("startup")
 def startup() -> None:
     ensure_seed_data()
+    remove_demo_data()
+    refresh_expired_statuses()
 
 
 @app.get("/api/health")
@@ -82,6 +95,35 @@ def api_jobs(
         "limit": limit,
     })
     return {"items": jobs, "count": len(jobs)}
+
+
+@app.get("/api/opportunities")
+def api_opportunities(
+    query: Optional[str] = None,
+    city: Optional[str] = None,
+    cohort: Optional[str] = None,
+    recruitment_type: Optional[str] = None,
+    company_type: Optional[str] = None,
+    industry: Optional[str] = None,
+    source_level: Optional[str] = Query(default=None, pattern="^[SABCD]?$"),
+    freshness_days: int = Query(default=0, ge=0, le=3650),
+    include_expired: bool = False,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict:
+    return list_opportunities({
+        "query": query,
+        "city": city,
+        "cohort": cohort,
+        "recruitment_type": recruitment_type,
+        "company_type": company_type,
+        "industry": industry,
+        "source_level": source_level,
+        "freshness_days": freshness_days,
+        "include_expired": include_expired,
+        "offset": offset,
+        "limit": limit,
+    })
 
 
 @app.get("/api/jobs/{job_id}")
@@ -261,6 +303,12 @@ def api_wechat_discovery_runs(limit: int = Query(default=30, ge=1, le=200)) -> d
 @app.get("/api/wechat/sources")
 def api_wechat_sources() -> dict:
     return list_sources()
+
+
+@app.get("/api/sources/registry")
+def api_source_registry() -> dict:
+    items = registry_items()
+    return {"items": items, "count": len(items)}
 
 
 if WEB_DIR.exists():

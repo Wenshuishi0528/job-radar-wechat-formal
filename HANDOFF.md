@@ -1,137 +1,109 @@
-# Handoff 交接说明
+# Handoff 维护说明
 
 日期：2026-07-09
-版本：0.6.0
-项目：Job Radar MVP + Multi-source Search
+版本：0.7.0
+项目：Job Radar 校招雷达
 
 ## 当前状态
 
-本仓库已经包含一个可以本地运行的 MVP。它不是完整招聘平台，也不是完整爬虫系统。当前目标是验证三组能力：
+仓库已经是可直接使用的个人本地版，而不是演示数据页面。主界面采用左侧设置、右侧网申表格的工作区，支持拖拽改变两侧宽度。用户只需输入条件并点击“搜索并刷新”，系统会先展示本地数据，再运行无 API 密钥的多来源搜索并合并结果。
 
-1. 校招雷达：招聘信号、岗位搜索、毕业时间匹配、笔试负担分、来源可信度、证据展示、手动导入公告文本和变更记录。
-2. 多来源自动搜索：先匹配内置官方招聘目录，再通过普通 Google / Bing / 搜狗微信通道发现企业官网、招聘平台、开源/社区、高校就业网和公众号文章；公开招聘页会被抓取并抽取岗位，普通网页兜底进入招聘信号库，公众号文章进入文章索引。
-3. 个人本地启动：`START_HERE.command` 可双击运行，默认只监听本机 `127.0.0.1`。
+当前主链路：
 
+1. `/api/opportunities` 统一返回具体岗位和招聘项目。
+2. `source_registry.py` 提供 58 个已知官方来源及公司别名。
+3. Google News RSS 负责稳定发现近期中文校招公告。
+4. Google、Bing 普通网页搜索负责补充官网、招聘平台、高校、社区和开源来源。
+5. 搜狗微信作为公众号专项通道保留。
+6. `web_search_importer.py` 做相关性过滤、公司识别、字段抽取、来源匹配和跨媒体去重。
+7. `repository.py` 负责入库、状态维护、统一筛选和过期处理。
 
+旧版示例岗位和示例公众号文章会在启动时定向清理，不再自动 seed。
 
-## 如何运行
+## 运行与验证
 
-最简单：
+最简单的启动方式是双击：
 
 ```text
-双击 START_HERE.command
+START_HERE.command
 ```
 
-手动：
+手动启动：
 
 ```bash
-cd job-radar-wechat-formal
-python -m venv .venv
+cd /Users/apple/Downloads/job-radar-wechat-formal
 source .venv/bin/activate
-pip install -r requirements.txt
-ENABLE_WECHAT_PUBLIC_FETCH=1 JOB_RADAR_PERSONAL_MODE=1 uvicorn services.api.main:app --reload --host 127.0.0.1 --port 8000
+JOB_RADAR_PERSONAL_MODE=1 \
+ENABLE_WEB_SEARCH_IMPORT=1 \
+ENABLE_WECHAT_PUBLIC_FETCH=1 \
+ENABLE_SOGOU_DISCOVERY=1 \
+uvicorn services.api.main:app --host 127.0.0.1 --port 8000
 ```
 
-打开 `http://localhost:8000`。
-
-测试：
+验证命令：
 
 ```bash
-python -m unittest discover -s tests
+.venv/bin/python -m unittest discover -s tests
+node --check apps/web/app.js
+curl -fsS http://127.0.0.1:8000/api/health
 ```
 
-## 重要文件
+## 关键文件
 
-`services/api/main.py` 是 FastAPI 入口，负责 API 和静态前端挂载。
+- `services/api/main.py`：FastAPI 路由、启动清理和静态前端挂载。
+- `services/api/app/source_registry.py`：公司别名、企业类型、行业和官方招聘地址。
+- `services/api/app/web_search_importer.py`：Google News、Google、Bing、搜狗微信发现和导入。
+- `services/api/app/repository.py`：公司、项目、岗位、证据、信号、变更和统一机会查询。
+- `services/api/app/wechat_articles.py`：公众号文章解析、去重、质量和新鲜度。
+- `apps/web/index.html`：工作区和语义化网申表格。
+- `apps/web/app.js`：统一搜索、筛选、排序、画像匹配和自动刷新。
+- `apps/web/styles.css`：桌面、手机和可拖拽布局。
+- `tests/test_opportunities.py`：过期过滤、项目去重和统一表格测试。
+- `tests/test_web_search_importer.py`：联网结果解析、相关性过滤和导入测试。
 
-`services/api/app/database.py` 定义 SQLite schema 和数据库初始化。0.2.0 新增了公众号文章相关表。
+## 数据规则
 
-`services/api/app/repository.py` 负责读写公司、招聘项目、岗位、证据、信号和变更事件。启动时也会 seed 公众号文章演示数据。
+`JobPosting` 只用于已经抽取到明确岗位名称的结果。只能确认招聘活动时使用 `RecruitmentCampaign`，前端标为“招聘项目”，不得补造岗位名。
 
-`services/api/app/wechat_articles.py` 是公众号文章源主模块，包含 URL 规范化、HTML 解析、图片提取、质量评分、新鲜度评分、入库、搜索、搜狗搜索结果 HTML 解析和发现运行记录。
+状态口径：
 
-`services/api/app/web_search_importer.py` 是普通 Google/Bing/搜狗微信复合搜索自动导入模块。它不使用第三方搜索 API；会先按公司别名匹配内置官方招聘目录，例如国家能源集团 `zhaopin.chnenergy.com.cn`，再让 Google/Bing 按 `source_scope` 搜企业官网、招聘平台、开源/社区、高校就业网和公众号。公开招聘页会尝试抽取岗位并写入 `jobs`；抽不出岗位的非公众号网页写入 `signals` 并保持 `pending_review`；公众号文章调用公众号文章抓取入库。搜狗微信保留为公众号专项通道。遇到验证码、登录确认或异常流量页面会停止并记录失败，不做绕过。
+- 截止日期早于今天：`closed`。
+- 有明确开放依据：`open`。
+- 没有截止日期且没有届别依据：`pending_review`。
+- 默认列表隐藏 `closed` 和 `expired`，用户可手动显示过期记录。
 
-`services/api/app/wechat_official_api.py` 是授权公众号官方 API 适配器。它只用于自己授权的公众号，不是全网搜索接口。
+Google News 的同一公司、届别和招聘类型会跨发布媒体合并。匹配到官方来源时优先提供官网入口；未匹配到官方来源时只保留原公告链接和较低来源等级。
 
-`services/api/app/external_search_adapters.py` 是 Firecrawl / Tavily 的可选发现器骨架。当前个人版主流程不使用第三方搜索 API；Google、Bing 和搜狗微信都走普通搜索自动导入。
+## 公众号边界
 
-`docs/wechat-article-source.md` 是公众号文章源的设计说明和生产化路线。
+搜狗微信发现功能仍在，但不会使用个人微信 Cookie、`appmsg_token`、验证码识别、代理池或中间人抓包。遇到验证码、登录确认、异常流量或访问拒绝时停止该来源，并把错误显示给用户。
 
-`apps/web/index.html`、`apps/web/app.js`、`apps/web/styles.css` 是静态前端。
+授权公众号 API 只用于同步自己或合作方授权的公众号，不是全网搜索接口。公众号文章是可追溯线索，不能直接替代企业官网的投递结论。
 
-`services/worker/monitor.py` 是后续做数据源监控的骨架，目前没有接真实调度。
+## 已知限制
 
-## 已完成的产品能力
+1. 全网招聘没有统一开放接口，无法保证互联网中每个岗位都被发现。
+2. 动态渲染、登录墙、验证码和搜索引擎地区差异会影响 Google、Bing、搜狗的覆盖率。
+3. 规则抽取对复杂表格、图片公告和附件 PDF 的岗位明细识别有限。
+4. 目前是用户触发加每日本机刷新，没有常驻后台调度和系统通知。
+5. SQLite 适合个人本地使用，不适合多用户并发部署。
+6. 公众号结果取决于搜狗微信当前可访问性；为空时前端显示真实空状态。
+7. 尚未提供收藏、投递进度、截止提醒、CSV 导出和日历订阅。
 
-1. 三层数据模型：Company、RecruitmentCampaign、JobPosting。
-2. 信号库：Signal 与正式岗位分离。
-3. 证据库：Evidence 记录字段、原文、URL 和置信度。
-4. 变更记录：ChangeEvent 记录关键字段的新旧值。
-5. 笔试分类：免笔试、无统一笔试、岗位特定、在线测评、明确笔试、未知。
-6. 笔试负担分：0 到 5 分。
-7. 用户画像匹配：学校地区、毕业时间、学历、城市、笔试偏好。
-8. 手动导入公告文本：用于冷启动和编辑后台雏形。
-9. 微信公众号文章源：文章解析、入库、搜索、质量分、新鲜度分、候选发现记录。
-10. 个人启动脚本：自动建环境、装依赖、开启本地个人模式。
-11. Google/Bing/搜狗微信自动搜索导入：不需要 API 密钥，支持综合、企业官网、招聘平台、开源/社区、高校就业网和公众号范围。
-12. 可拖拽前端工作区：左侧集中设置，右侧集中显示招聘信号、岗位和公众号文章。
-13. 岗位级自动抽取：官方招聘页可抽取岗位名、单位、城市、学历、专业和截止日期并进入岗位库。
-14. 单元测试：覆盖笔试分类、用户匹配、公众号文章解析、入库、搜索、旧文章过滤、普通搜索结果解析、非公众号网页转信号、岗位抽取和反验证码绕过边界。
-
-## 当前限制
-
-1. 没有接入真实招聘网站后台监控，只是按用户触发做普通搜索导入。
-2. 没有登录、收藏、投递管理、保存搜索和提醒。
-3. 没有真正的编辑后台，目前只有简化导入表单。
-4. 没有 LLM 结构化提取，只有规则提取。
-5. 没有公司别名合并和复杂去重。
-6. 没有 OpenSearch / Elasticsearch，公众号文章搜索仍然是 SQLite LIKE。
-7. 搜狗微信、Google 和 Bing 已进入个人版普通搜索自动导入流程；Firecrawl、Tavily 和微信官方 API 仍只是安全骨架。
-8. 前端是纯静态页面，不是 Next.js。
-9. SQLite schema 适合 MVP，不适合高并发生产环境。
-
-## 公众号文章源边界
-
-不要使用个人微信 Cookie、appmsg_token、抓包参数、验证码识别、代理池或 MITM。
-
-搜狗微信、Google 和 Bing 搜到的公众号文章只作为情报来源。Google/Bing 搜到的企业官网、招聘平台、高校和社区页面也只是招聘信号。文章或网页都不等于正式岗位事实，进入岗位库前必须有来源等级、发布时间、新鲜度、可信度和人工复核。
-
-授权公众号官方 API 只适合企业或博主合作后同步自己账号的已发布文章。它不是全网公众号文章搜索。
-
-默认搜索只看近 45 天的已知发布时间文章。历史文章必须显式 include_stale。
-
-## 下一批开发任务
+## 下一步优先级
 
 P0：
 
-1. Source Registry 后台化，覆盖企业官网、招聘平台、高校就业网、公众号和社区来源。
-2. 公众号账号 allowlist / blocklist 管理后台。
-3. OpenSearch / Elasticsearch 索引适配器。
-4. 编辑后台：新信号、公众号候选、低质量文章、冲突信息、疑似关闭队列。
-5. 保存原始 HTML 快照和解析版本。
-6. 真实 worker 调度、频控、失败重试和内容 hash。
-7. 用户保存搜索和提醒。
-8. 投递管理。
+1. 为官方来源增加自动健康检查和失效地址替换。
+2. 增加收藏、投递状态、备注和截止提醒。
+3. 增加 CSV/Excel 导出和日历订阅。
+4. 增加 PDF、图片 OCR 与复杂职位表解析。
 
 P1：
 
-1. 接 5 到 10 个稳定公开来源，优先公司官网、高校就业网和官方公众号。
-2. 接授权公众号官方 API 的同步任务。
-3. 接 Firecrawl/Tavily 作为可选补充发现器。
-4. 增加公众号文章到招聘信号的转换审核流。
-5. 增加公司页、招聘项目页和岗位生命周期。
-6. 增加冲突检测和去重合并。
+1. 增加可配置的定时刷新 worker 和失败重试。
+2. 增加来源审核、公司别名合并和冲突处理界面。
+3. 增加多个用户画像和保存搜索。
+4. 在数据量明显超过 SQLite 能力后再评估全文搜索引擎。
 
-P2：
-
-1. 社区匿名进度墙。
-2. 博主表格导入工具。
-3. 学校页面。
-4. 导出 CSV 和日历订阅。
-5. 多画像。
-6. 简历版本名称管理，暂不上传简历文件。
-
-## 给下一位开发者的建议
-
-先跑测试，再启动服务。先理解 `wechat_articles.py` 的边界，再接任何外部搜索或抓取源。这个模块的核心不是“多抓”，而是“新鲜、可信、可追溯、可审核”。
+维护原则是优先保证结果真实、来源可追溯、过期可识别，再扩大覆盖率。不要以增加结果数量为理由放松相关性和证据约束。

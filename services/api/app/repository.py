@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from .change_detector import detect_changes
 from .database import get_connection, init_db
 from .extraction import ExtractedNotice
-from .sample_data import DEMO_COMPANIES, DEMO_SIGNALS
+from .source_registry import ensure_source_registry
 from .wechat_articles import ensure_wechat_seed_data
 
 
@@ -36,30 +38,81 @@ def ensure_seed_data() -> None:
     init_db()
     with get_connection() as conn:
         ensure_wechat_seed_data(conn)
-        count = conn.execute("SELECT COUNT(*) FROM companies").fetchone()[0]
-        if count:
-            conn.commit()
-            return
-        for company in DEMO_COMPANIES:
-            company_id = upsert_company(conn, company)
-            for campaign in company["campaigns"]:
-                process_rule = campaign.pop("process_rule")
-                jobs = campaign.pop("jobs")
-                campaign_id = insert_campaign(conn, company_id, campaign)
-                insert_process_rule(conn, campaign_id, None, process_rule)
-                for job in jobs:
-                    insert_job(conn, company_id, campaign_id, {
-                        **job,
-                        "apply_url": campaign.get("apply_url"),
-                        "source_url": campaign.get("source_url"),
-                        "source_level": campaign.get("source_level", company.get("source_level", "C")),
-                    })
-                campaign["process_rule"] = process_rule
-                campaign["jobs"] = jobs
-        for signal in DEMO_SIGNALS:
-            company_id = get_company_id_by_name(conn, signal["company_name"])
-            insert_signal(conn, company_id, None, signal)
+        ensure_source_registry(conn)
         conn.commit()
+
+
+def remove_demo_data() -> None:
+    init_db()
+    with get_connection() as conn:
+        demo_company_ids = [
+            int(row["id"])
+            for row in conn.execute(
+                "SELECT id FROM companies WHERE name LIKE '示例%' OR official_site LIKE 'https://example.com/%' OR recruit_site LIKE 'https://example.com/%'"
+            ).fetchall()
+        ]
+        demo_campaign_ids = [
+            int(row["id"])
+            for row in conn.execute(
+                "SELECT id FROM campaigns WHERE source_url LIKE 'https://example.com/%' OR apply_url LIKE 'https://example.com/%'"
+            ).fetchall()
+        ]
+        demo_job_ids = [
+            int(row["id"])
+            for row in conn.execute(
+                "SELECT id FROM jobs WHERE source_url LIKE 'https://example.com/%' OR apply_url LIKE 'https://example.com/%'"
+            ).fetchall()
+        ]
+        if demo_job_ids:
+            placeholders = ",".join("?" for _ in demo_job_ids)
+            conn.execute(f"DELETE FROM evidence WHERE entity_type='job' AND entity_id IN ({placeholders})", demo_job_ids)
+            conn.execute(f"DELETE FROM process_rules WHERE job_id IN ({placeholders})", demo_job_ids)
+            conn.execute(f"DELETE FROM jobs WHERE id IN ({placeholders})", demo_job_ids)
+        if demo_campaign_ids:
+            placeholders = ",".join("?" for _ in demo_campaign_ids)
+            conn.execute(f"DELETE FROM evidence WHERE entity_type='campaign' AND entity_id IN ({placeholders})", demo_campaign_ids)
+            conn.execute(f"DELETE FROM change_events WHERE entity_type='campaign' AND entity_id IN ({placeholders})", demo_campaign_ids)
+            conn.execute(f"DELETE FROM process_rules WHERE campaign_id IN ({placeholders})", demo_campaign_ids)
+            conn.execute(f"DELETE FROM jobs WHERE campaign_id IN ({placeholders})", demo_campaign_ids)
+            conn.execute(f"DELETE FROM campaigns WHERE id IN ({placeholders})", demo_campaign_ids)
+        conn.execute("DELETE FROM signals WHERE source_url LIKE 'https://example.com/%'")
+        if demo_company_ids:
+            placeholders = ",".join("?" for _ in demo_company_ids)
+            conn.execute(f"DELETE FROM signals WHERE company_id IN ({placeholders})", demo_company_ids)
+            conn.execute(f"DELETE FROM jobs WHERE company_id IN ({placeholders})", demo_company_ids)
+            conn.execute(f"DELETE FROM campaigns WHERE company_id IN ({placeholders})", demo_company_ids)
+            conn.execute(f"DELETE FROM companies WHERE id IN ({placeholders})", demo_company_ids)
+        demo_article_ids = [
+            int(row["id"])
+            for row in conn.execute(
+                "SELECT id FROM wechat_articles WHERE canonical_url='https://mp.weixin.qq.com/s/demo-campus-recruit-2027' OR source='seed_demo'"
+            ).fetchall()
+        ]
+        if demo_article_ids:
+            placeholders = ",".join("?" for _ in demo_article_ids)
+            conn.execute(f"DELETE FROM wechat_article_images WHERE article_id IN ({placeholders})", demo_article_ids)
+            conn.execute(f"DELETE FROM wechat_articles WHERE id IN ({placeholders})", demo_article_ids)
+        conn.commit()
+
+
+def refresh_expired_statuses(today: str | None = None) -> int:
+    cutoff = today or date.today().isoformat()
+    with get_connection() as conn:
+        campaigns = conn.execute(
+            "UPDATE campaigns SET status='closed', updated_at=? WHERE deadline IS NOT NULL AND deadline < ? AND status IN ('open','closing_soon')",
+            (now_iso(), cutoff),
+        ).rowcount
+        jobs = conn.execute(
+            """
+            UPDATE jobs SET status='closed', updated_at=?
+            WHERE status IN ('open','closing_soon') AND campaign_id IN (
+                SELECT id FROM campaigns WHERE deadline IS NOT NULL AND deadline < ?
+            )
+            """,
+            (now_iso(), cutoff),
+        ).rowcount
+        conn.commit()
+    return int(campaigns or 0) + int(jobs or 0)
 
 
 def get_company_id_by_name(conn: Any, name: str) -> int | None:
@@ -229,6 +282,18 @@ def _db_to_bool(value: Any) -> bool | None:
     return bool(value)
 
 
+def _status_for_deadline(deadline: str | None, requested: str = "open") -> str:
+    if deadline and str(deadline)[:10] < date.today().isoformat():
+        return "closed"
+    return requested
+
+
+def _campaign_signature(value: str) -> str:
+    value = re.sub(r"^[【\[].*?[】\]]\s*", "", (value or "").lower())
+    compact = re.sub(r"[\s【】\[\]（）()，,。.!！:：·|_-]+", "", value)
+    return compact.replace("正式", "")
+
+
 def hydrate_job(row: Any) -> dict[str, Any]:
     data = row_to_dict(row)
     if not data:
@@ -348,6 +413,7 @@ def list_jobs(filters: dict[str, Any]) -> list[dict[str, Any]]:
         params.append(int(max_written_burden))
     if filters.get("only_open", True):
         clauses.append("j.status IN ('open', 'closing_soon')")
+        clauses.append("(ca.deadline IS NULL OR date(ca.deadline) >= date('now'))")
     sql = _base_job_query() + " WHERE " + " AND ".join(clauses) + " ORDER BY ca.deadline IS NULL, ca.deadline ASC, j.quality_score DESC LIMIT ?"
     params.append(int(filters.get("limit", 100)))
     with get_connection() as conn:
@@ -374,6 +440,313 @@ def get_job(job_id: int) -> dict[str, Any] | None:
         ).fetchall()
         job["changes"] = [row_to_dict(r) for r in change_rows]
         return job
+
+
+def import_discovered_campaign(item: dict[str, Any]) -> dict[str, int]:
+    ensure_seed_data()
+    with get_connection() as conn:
+        company_id = upsert_company(conn, {
+            "name": item.get("company_name") or "未知公司",
+            "aliases": item.get("company_aliases", []),
+            "company_type": item.get("company_type", "unknown"),
+            "industry": item.get("industry", "unknown"),
+            "official_site": item.get("official_site"),
+            "recruit_site": item.get("recruit_site") or item.get("apply_url"),
+            "source_level": item.get("company_source_level", item.get("source_level", "B")),
+        })
+        campaign_name = item.get("campaign_name") or item.get("title") or "招聘公告"
+        cohort = item.get("target_cohort")
+        source_url = item.get("source_url")
+        existing = None
+        if source_url:
+            existing = conn.execute(
+                "SELECT id FROM campaigns WHERE company_id=? AND source_url=? ORDER BY id DESC LIMIT 1",
+                (company_id, source_url),
+            ).fetchone()
+        if not existing:
+            existing = conn.execute(
+                """SELECT id FROM campaigns WHERE company_id=? AND name=?
+                AND COALESCE(target_cohort, '')=COALESCE(?, '') ORDER BY id DESC LIMIT 1""",
+                (company_id, campaign_name, cohort),
+            ).fetchone()
+        if not existing:
+            signature = _campaign_signature(campaign_name)
+            comparable = conn.execute(
+                """SELECT id, name FROM campaigns WHERE company_id=?
+                AND COALESCE(target_cohort, '')=COALESCE(?, '')""",
+                (company_id, cohort),
+            ).fetchall()
+            existing = next((row for row in comparable if _campaign_signature(row["name"]) == signature), None)
+        if not existing and source_url and "news.google.com/" in source_url:
+            existing = conn.execute(
+                """
+                SELECT id FROM campaigns WHERE company_id=?
+                AND COALESCE(target_cohort, '')=COALESCE(?, '')
+                AND recruitment_type=? AND source_url LIKE 'https://news.google.com/%'
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (company_id, cohort, item.get("recruitment_type", "校招")),
+            ).fetchone()
+        if not existing and source_url and "news.google.com/" in source_url:
+            existing = conn.execute(
+                """
+                SELECT id FROM campaigns WHERE company_id=? AND recruitment_type=?
+                AND source_url LIKE 'https://news.google.com/%'
+                AND (target_cohort IS NULL OR ? IS NULL)
+                ORDER BY target_cohort IS NOT NULL DESC, updated_at DESC LIMIT 1
+                """,
+                (company_id, item.get("recruitment_type", "校招"), cohort),
+            ).fetchone()
+        if existing:
+            existing_campaign = conn.execute(
+                "SELECT name, target_cohort FROM campaigns WHERE id=?",
+                (int(existing["id"]),),
+            ).fetchone()
+            if existing_campaign and re.search(r"20\d{2}\s*届", existing_campaign["name"] or "") and not re.search(r"20\d{2}\s*届", campaign_name):
+                campaign_name = existing_campaign["name"]
+        status = _status_for_deadline(item.get("deadline"), item.get("status", "pending_review"))
+        campaign_data = {
+            "name": campaign_name,
+            "recruitment_type": item.get("recruitment_type", "校招"),
+            "target_cohort": cohort,
+            "status": status,
+            "start_date": item.get("start_date"),
+            "deadline": item.get("deadline"),
+            "accepts_overseas": item.get("accepts_overseas"),
+            "degree_min": item.get("degree_min", "bachelor"),
+            "apply_url": item.get("apply_url"),
+            "source_url": source_url,
+            "source_level": item.get("source_level", "B"),
+        }
+        ts = now_iso()
+        if existing:
+            campaign_id = int(existing["id"])
+            conn.execute(
+                """
+                UPDATE campaigns SET name=?, recruitment_type=?, target_cohort=COALESCE(?, target_cohort),
+                    status=?, start_date=COALESCE(?, start_date), deadline=COALESCE(?, deadline),
+                    degree_min=?, apply_url=COALESCE(?, apply_url), source_url=COALESCE(?, source_url),
+                    source_level=?, last_verified_at=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    campaign_name,
+                    campaign_data["recruitment_type"],
+                    cohort,
+                    status,
+                    campaign_data["start_date"],
+                    campaign_data["deadline"],
+                    campaign_data["degree_min"],
+                    campaign_data["apply_url"],
+                    source_url,
+                    campaign_data["source_level"],
+                    ts,
+                    ts,
+                    campaign_id,
+                ),
+            )
+        else:
+            campaign_id = insert_campaign(conn, company_id, campaign_data)
+        evidence_text = item.get("evidence_text") or campaign_name
+        existing_evidence = conn.execute(
+            "SELECT id FROM evidence WHERE entity_type='campaign' AND entity_id=? AND field_name='announcement' AND COALESCE(source_url, '')=COALESCE(?, '') LIMIT 1",
+            (campaign_id, source_url),
+        ).fetchone()
+        if not existing_evidence:
+            insert_evidence(
+                conn,
+                "campaign",
+                campaign_id,
+                "announcement",
+                campaign_name,
+                evidence_text,
+                source_url,
+                float(item.get("confidence", 0.75)),
+            )
+        signal = conn.execute(
+            "SELECT id FROM signals WHERE signal_type='recruitment_announcement' AND source_url=? LIMIT 1",
+            (source_url,),
+        ).fetchone() if source_url else None
+        if signal:
+            signal_id = int(signal["id"])
+            conn.execute(
+                "UPDATE signals SET company_id=?, campaign_id=?, title=?, description=?, source_level=?, status=?, detected_at=?, evidence_text=? WHERE id=?",
+                (
+                    company_id,
+                    campaign_id,
+                    campaign_name,
+                    item.get("description"),
+                    campaign_data["source_level"],
+                    status,
+                    ts,
+                    evidence_text,
+                    signal_id,
+                ),
+            )
+        else:
+            signal_id = insert_signal(conn, company_id, campaign_id, {
+                "signal_type": "recruitment_announcement",
+                "title": campaign_name,
+                "description": item.get("description"),
+                "source_url": source_url,
+                "source_level": campaign_data["source_level"],
+                "status": status,
+                "detected_at": ts,
+                "evidence_text": evidence_text,
+            })
+        conn.commit()
+        return {"company_id": company_id, "campaign_id": campaign_id, "signal_id": signal_id}
+
+
+def _current_campus_year() -> int:
+    today = date.today()
+    return today.year + 1 if today.month >= 6 else today.year
+
+
+def _expand_opportunity_query_terms(query: str) -> list[str]:
+    query = (query or "").strip()
+    terms = [query, *[part for part in query.replace("，", " ").split() if part]]
+    compact = "".join(query.split()).lower()
+    if "秋招" in compact:
+        terms.extend(["秋招", "校园招聘", "校招", "提前批", "高校毕业生", f"{_current_campus_year()}届"])
+    if "春招" in compact:
+        terms.extend(["春招", "春季招聘", "校园招聘", "高校毕业生"])
+    if "实习" in compact:
+        terms.extend(["实习", "暑期实习", "实习生"])
+    if "央企" in compact or "国企" in compact:
+        terms.extend(["央企", "国企", "国资", "中央企业"])
+    deduped: list[str] = []
+    for term in terms:
+        normalized = term.strip().lower()
+        if normalized and normalized not in deduped:
+            deduped.append(normalized)
+    return deduped
+
+
+def list_opportunities(filters: dict[str, Any]) -> dict[str, Any]:
+    ensure_seed_data()
+    with get_connection() as conn:
+        job_rows = conn.execute(
+            """
+            SELECT 'job' AS record_type, j.id AS record_id, j.id AS job_id, ca.id AS campaign_id,
+                j.title, ca.name AS campaign_name, c.name AS company_name, c.company_type, c.industry,
+                j.cities_json, j.degree_min, ca.recruitment_type, ca.target_cohort, ca.deadline,
+                ca.accepts_overseas, j.status AS job_status, ca.status AS campaign_status,
+                COALESCE(j.apply_url, ca.apply_url) AS apply_url,
+                COALESCE(j.source_url, ca.source_url) AS source_url,
+                COALESCE(j.source_level, ca.source_level) AS source_level,
+                j.quality_score, j.risk_level, j.updated_at,
+                pr.written_test_status, pr.written_test_burden
+            FROM jobs j
+            JOIN campaigns ca ON ca.id=j.campaign_id
+            JOIN companies c ON c.id=j.company_id
+            LEFT JOIN process_rules pr ON pr.campaign_id=ca.id AND pr.job_id IS NULL
+            """
+        ).fetchall()
+        campaign_rows = conn.execute(
+            """
+            SELECT 'campaign' AS record_type, ca.id AS record_id, NULL AS job_id, ca.id AS campaign_id,
+                ca.name AS title, ca.name AS campaign_name, c.name AS company_name, c.company_type, c.industry,
+                '[]' AS cities_json, ca.degree_min, ca.recruitment_type, ca.target_cohort, ca.deadline,
+                ca.accepts_overseas, ca.status AS job_status, ca.status AS campaign_status,
+                ca.apply_url, ca.source_url, ca.source_level, 0.68 AS quality_score,
+                'campaign_only' AS risk_level, ca.updated_at,
+                'unknown' AS written_test_status, 5 AS written_test_burden
+            FROM campaigns ca
+            JOIN companies c ON c.id=ca.company_id
+            WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.campaign_id=ca.id)
+            """
+        ).fetchall()
+    today = date.today().isoformat()
+    items: list[dict[str, Any]] = []
+    for row in [*job_rows, *campaign_rows]:
+        data = dict(row)
+        deadline = data.get("deadline")
+        status = data.get("job_status") or data.get("campaign_status") or "pending_review"
+        if deadline and str(deadline)[:10] < today:
+            status = "closed"
+        elif status == "open" and not deadline and not data.get("target_cohort"):
+            status = "pending_review"
+        source_url = data.get("source_url") or ""
+        items.append({
+            "id": f"{data['record_type']}-{data['record_id']}",
+            "record_type": data["record_type"],
+            "job_id": data.get("job_id"),
+            "campaign_id": data.get("campaign_id"),
+            "updated_at": data.get("updated_at"),
+            "company_name": data.get("company_name") or "未知公司",
+            "company_type": data.get("company_type") or "unknown",
+            "industry": data.get("industry") or "unknown",
+            "title": data.get("title") or "待确认招聘项目",
+            "campaign_name": data.get("campaign_name") or "",
+            "recruitment_type": data.get("recruitment_type") or "unknown",
+            "target_cohort": data.get("target_cohort"),
+            "cities": loads_json(data.get("cities_json"), []),
+            "degree_min": data.get("degree_min"),
+            "deadline": deadline,
+            "accepts_overseas": _db_to_bool(data.get("accepts_overseas")),
+            "status": status,
+            "apply_url": data.get("apply_url"),
+            "source_url": source_url or None,
+            "source_domain": urlparse(source_url).netloc.lower().removeprefix("www."),
+            "source_level": data.get("source_level") or "C",
+            "quality_score": float(data.get("quality_score") or 0),
+            "risk_level": data.get("risk_level") or "unknown",
+            "written_test_status": data.get("written_test_status") or "unknown",
+            "written_test_burden": int(data.get("written_test_burden") if data.get("written_test_burden") is not None else 5),
+        })
+    query = str(filters.get("query") or "").strip()
+    if query:
+        terms = _expand_opportunity_query_terms(query)
+        items = [
+            item for item in items
+            if any(term in " ".join([
+                item["company_name"], item["company_type"], item["industry"], item["title"],
+                item["campaign_name"], item["recruitment_type"], item.get("target_cohort") or "",
+                " ".join(item["cities"]),
+            ]).lower() for term in terms)
+        ]
+    city = str(filters.get("city") or "").strip()
+    if city:
+        items = [item for item in items if any(city in value for value in item["cities"])]
+    cohort = str(filters.get("cohort") or "").strip()
+    if cohort:
+        normalized_cohort = cohort if cohort.endswith("届") else f"{cohort}届"
+        items = [item for item in items if item.get("target_cohort") == normalized_cohort]
+    recruitment_type = str(filters.get("recruitment_type") or "").strip()
+    if recruitment_type:
+        items = [item for item in items if recruitment_type in item["recruitment_type"] or recruitment_type in item["campaign_name"]]
+    company_type = str(filters.get("company_type") or "").strip()
+    if company_type == "国央企":
+        items = [item for item in items if item["company_type"] in {"央企", "国企", "政府"} or "国企" in item["industry"] or "央企" in item["industry"]]
+    elif company_type:
+        items = [item for item in items if company_type in item["company_type"]]
+    industry = str(filters.get("industry") or "").strip()
+    if industry:
+        items = [item for item in items if industry in item["industry"]]
+    source_level = str(filters.get("source_level") or "").strip()
+    if source_level:
+        ranks = {"S": 4, "A": 3, "B": 2, "C": 1, "D": 0}
+        items = [item for item in items if ranks.get(item["source_level"], 0) >= ranks.get(source_level, 0)]
+    if not bool(filters.get("include_expired", False)):
+        items = [item for item in items if item["status"] not in {"closed", "expired"}]
+    freshness_days = int(filters.get("freshness_days") or 0)
+    if freshness_days > 0:
+        cutoff = (date.today() - timedelta(days=freshness_days)).isoformat()
+        items = [item for item in items if not item.get("updated_at") or str(item["updated_at"])[:10] >= cutoff]
+    items.sort(key=lambda item: (item.get("updated_at") or "", item.get("quality_score") or 0), reverse=True)
+    total = len(items)
+    offset = max(0, int(filters.get("offset") or 0))
+    limit = min(500, max(1, int(filters.get("limit") or 200)))
+    page = items[offset:offset + limit]
+    return {
+        "items": page,
+        "count": total,
+        "job_count": len([item for item in items if item["record_type"] == "job"]),
+        "campaign_count": len([item for item in items if item["record_type"] == "campaign"]),
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 def list_signals(limit: int = 50) -> list[dict[str, Any]]:
@@ -511,7 +884,7 @@ def import_scraped_job(job: dict[str, Any]) -> dict[str, Any]:
             "name": campaign_name,
             "recruitment_type": job.get("recruitment_type", "校招"),
             "target_cohort": target_cohort,
-            "status": "open",
+            "status": _status_for_deadline(job.get("deadline")),
             "deadline": job.get("deadline"),
             "domestic_grad_start": job.get("domestic_grad_start"),
             "domestic_grad_end": job.get("domestic_grad_end"),
@@ -581,7 +954,7 @@ def import_scraped_job(job: dict[str, Any]) -> dict[str, Any]:
             "apply_url": job.get("apply_url") or job.get("source_url"),
             "source_url": job.get("source_url"),
             "source_level": job.get("source_level", "A"),
-            "status": "open",
+            "status": _status_for_deadline(job.get("deadline")),
             "quality_score": float(job.get("quality_score", 0.72)),
             "risk_level": job.get("risk_level", "needs_review"),
         }

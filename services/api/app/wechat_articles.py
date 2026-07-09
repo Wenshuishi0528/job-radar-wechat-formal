@@ -350,30 +350,15 @@ def ensure_wechat_seed_data(conn: Any) -> None:
     )
     if conn.execute("SELECT COUNT(*) FROM wechat_accounts").fetchone()[0] == 0:
         accounts = [
-            ("公司官方招聘", "", json.dumps(["官方招聘", "校园招聘"], ensure_ascii=False), "company_official", "S", 1, 0, "示例账号类型。真实上线时按公众号主体、认证信息和官方链接人工核验。", ts, ts),
+            ("公司官方招聘", "", json.dumps(["官方招聘", "校园招聘"], ensure_ascii=False), "company_official", "S", 1, 0, "按公众号主体、认证信息和官方链接核验。", ts, ts),
             ("高校就业网", "", json.dumps(["就业指导中心", "学生就业"], ensure_ascii=False), "university_career", "A", 1, 0, "高校就业信息来源通常可作为高价值线索。", ts, ts),
-            ("求职营销号", "", json.dumps(["内推收费", "保offer"], ensure_ascii=False), "marketing", "D", 0, 1, "示例屏蔽类型。", ts, ts),
+            ("求职营销号", "", json.dumps(["内推收费", "保offer"], ensure_ascii=False), "marketing", "D", 0, 1, "默认屏蔽低可信营销来源。", ts, ts),
         ]
         conn.executemany(
             """INSERT INTO wechat_accounts(account_name, account_biz, account_aliases_json, account_type, trust_level, is_allowlisted, is_blocked, notes, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             accounts,
         )
-    if conn.execute("SELECT COUNT(*) FROM wechat_articles").fetchone()[0] == 0:
-        demo = ParsedArticle(
-            canonical_url="https://mp.weixin.qq.com/s/demo-campus-recruit-2027",
-            original_url="https://mp.weixin.qq.com/s/demo-campus-recruit-2027",
-            title="云狸科技 2027 届秋招提前批正式启动",
-            account_name="公司官方招聘",
-            digest="面向 2027 届海内外毕业生，产品、技术、运营岗位开放。",
-            cover_url="https://example.com/cover/cloudraccoon.jpg",
-            publish_at="2026-07-08 09:30:00",
-            content_text="云狸科技 2027 届秋招提前批正式启动。海外毕业时间为 2026 年 9 月至 2027 年 8 月。不设置统一笔试，部分技术岗位可能安排在线题。",
-            content_html="<p>云狸科技 2027 届秋招提前批正式启动。</p>",
-            images=[],
-            content_hash="demo_cloudraccoon_2027",
-        )
-        upsert_article(conn, demo, source="seed_demo", source_query="demo", max_age_days=3650)
     conn.commit()
 
 

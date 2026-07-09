@@ -1,1 +1,1 @@
-"""Core application package for Job Radar MVP."""
+"""Core application package for Job Radar."""

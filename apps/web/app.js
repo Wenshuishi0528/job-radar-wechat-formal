@@ -1,421 +1,443 @@
 const $ = (id) => document.getElementById(id);
 
+const state = {
+  loading: false,
+  opportunities: [],
+  sortKey: 'updated_at',
+  sortDirection: 'desc',
+};
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
+  }[ch]));
+}
+
+function formatDate(value, fallback = '未知') {
+  if (!value) return fallback;
+  const match = String(value).match(/^\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : String(value);
+}
+
+function degreeLabel(value) {
+  return {
+    associate: '专科', bachelor: '本科', master: '硕士', phd: '博士',
+  }[value] || '学历未注明';
+}
+
+function statusLabel(value) {
+  return {
+    open: '开放', closing_soon: '即将截止', pending_review: '待确认',
+    closed: '已截止', expired: '已截止',
+  }[value] || '待确认';
+}
+
+function statusClass(value) {
+  if (value === 'open') return 'good';
+  if (value === 'closed' || value === 'expired') return 'bad';
+  return 'warn';
+}
+
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || data.error || `请求失败：${response.status}`);
+  return data;
+}
+
+function searchParams() {
+  const params = new URLSearchParams();
+  const values = {
+    query: $('query').value.trim(),
+    city: $('city').value.trim(),
+    cohort: $('cohort').value.trim(),
+    recruitment_type: $('recruitmentType').value,
+    company_type: $('companyType').value,
+    industry: $('industry').value,
+    source_level: $('sourceLevel').value,
+  };
+  Object.entries(values).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  params.set('include_expired', String($('includeExpired').checked));
+  params.set('limit', '500');
+  return params;
+}
+
+function refreshBody() {
+  return {
+    keyword: $('query').value.trim(),
+    provider: $('searchProvider').value,
+    source_scope: $('sourceScope').value,
+    freshness_days: Number($('freshnessDays').value || 90),
+    max_results: Number($('maxResults').value || 50),
+  };
+}
+
+function setSearchStatus(message, type = '') {
+  const element = $('searchStatus');
+  element.textContent = message;
+  element.className = `search-status ${type}`.trim();
+}
+
+function setLoading(loading) {
+  state.loading = loading;
+  $('searchButton').disabled = loading;
+  $('searchButton').textContent = loading ? '正在搜索...' : '搜索并刷新';
+}
+
+function renderOpportunityRow(item) {
+  const recordLabel = item.record_type === 'job' ? '具体岗位' : '招聘项目';
+  const campaignLine = item.record_type === 'job' && item.campaign_name && item.campaign_name !== item.title
+    ? `<span class="cell-sub">${escapeHtml(item.campaign_name)}</span>` : '';
+  const companyMeta = [item.company_type, item.industry].filter((value) => value && value !== 'unknown').join(' · ') || '企业信息待补充';
+  const cities = (item.cities || []).join(' / ') || '公告内查看';
+  const deadline = item.deadline ? formatDate(item.deadline) : '未注明';
+  const sourceLevel = String(item.source_level || 'C').toLowerCase();
+  const sourceName = item.source_domain || '来源待确认';
+  const status = `<span class="tag ${statusClass(item.status)}">${statusLabel(item.status)}</span>`;
+  const matchTag = item.match
+    ? `<span class="tag ${item.match.status === 'eligible' ? 'good' : item.match.status === 'not_eligible' ? 'bad' : 'warn'}">匹配 ${Math.round((item.match.score || 0) * 100)}%</span>` : '';
+  const applyUrl = item.apply_url || '';
+  const sourceUrl = item.source_url || '';
+  const applyAction = applyUrl
+    ? `<a class="primary-link" href="${escapeHtml(applyUrl)}" target="_blank" rel="noopener">${sourceUrl && sourceUrl !== applyUrl ? '官网 / 投递' : '查看'}</a>` : '';
+  const sourceAction = sourceUrl && sourceUrl !== applyUrl
+    ? `<a href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener">公告</a>` : '';
+  const detailAction = item.job_id
+    ? `<button type="button" data-job-id="${Number(item.job_id)}">证据</button>` : '';
+  const batch = [item.target_cohort || '届别未注明', item.recruitment_type || '类型未注明'].join(' · ');
+  return `<tr>
+    <td data-label="更新"><span class="cell-main">${escapeHtml(formatDate(item.updated_at))}</span><span class="cell-sub">${status}</span></td>
+    <td data-label="公司"><span class="cell-main">${escapeHtml(item.company_name)}</span><span class="cell-sub">${escapeHtml(companyMeta)}</span></td>
+    <td data-label="岗位 / 项目"><div class="title-line"><span class="cell-main">${escapeHtml(item.title)}</span><span class="tag">${recordLabel}</span>${matchTag}</div>${campaignLine}<span class="cell-sub">${escapeHtml(degreeLabel(item.degree_min))}</span></td>
+    <td data-label="批次"><span class="cell-main">${escapeHtml(batch)}</span></td>
+    <td data-label="地点"><span class="cell-main">${escapeHtml(cities)}</span></td>
+    <td data-label="截止"><span class="cell-main ${item.status === 'closed' ? 'deadline-passed' : ''}">${escapeHtml(deadline)}</span></td>
+    <td data-label="来源"><span class="tag source-${sourceLevel}">来源 ${escapeHtml(item.source_level || 'C')}</span><span class="cell-sub">${escapeHtml(sourceName)}</span></td>
+    <td data-label="操作"><div class="row-actions">${applyAction}${sourceAction}${detailAction}</div></td>
+  </tr>`;
+}
+
+function bindDetailButtons() {
+  document.querySelectorAll('[data-job-id]').forEach((button) => {
+    button.addEventListener('click', () => showDetail(Number(button.dataset.jobId)));
+  });
+}
+
+function sortedOpportunities(items) {
+  const sourceRanks = { S: 4, A: 3, B: 2, C: 1, D: 0 };
+  const direction = state.sortDirection === 'asc' ? 1 : -1;
+  return [...items].sort((left, right) => {
+    let a = left[state.sortKey] ?? '';
+    let b = right[state.sortKey] ?? '';
+    if (state.sortKey === 'source_level') {
+      a = sourceRanks[a] || 0;
+      b = sourceRanks[b] || 0;
+    }
+    return String(a).localeCompare(String(b), 'zh-CN', { numeric: true }) * direction;
+  });
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll('[data-sort-column]').forEach((header) => {
+    if (header.dataset.sortColumn === state.sortKey) header.setAttribute('aria-sort', state.sortDirection === 'asc' ? 'ascending' : 'descending');
+    else header.removeAttribute('aria-sort');
+  });
+}
+
+function renderOpportunities(items) {
+  state.opportunities = items;
+  const sorted = sortedOpportunities(items);
+  $('opportunityRows').innerHTML = sorted.map(renderOpportunityRow).join('');
+  $('emptyOpportunities').hidden = items.length > 0;
+  document.querySelector('.opportunity-table')?.classList.toggle('empty', items.length === 0);
+  updateSortHeaders();
+  bindDetailButtons();
+}
+
+async function loadOpportunities() {
+  const data = await fetchJson(`/api/opportunities?${searchParams().toString()}`);
+  renderOpportunities(data.items || []);
+  $('resultSummary').textContent = `共 ${data.count || 0} 条 · ${data.job_count || 0} 个具体岗位 · ${data.campaign_count || 0} 个招聘项目`;
+  return data;
+}
+
+async function runSearch({ refresh = true } = {}) {
+  if (state.loading) return;
+  setLoading(true);
+  let localData = null;
+  try {
+    setSearchStatus('正在读取本地机会库...');
+    localData = await loadOpportunities();
+    switchView('opportunities');
+  } catch (error) {
+    setSearchStatus(error.message, 'error');
+    setLoading(false);
+    return;
+  }
+  const body = refreshBody();
+  if (!refresh || !$('onlineRefresh').checked || !body.keyword) {
+    setSearchStatus(`已显示 ${localData.count || 0} 条本地结果`, 'success');
+    setLoading(false);
+    return;
+  }
+  try {
+    setSearchStatus(`已显示 ${localData.count || 0} 条本地结果，正在联网更新...`);
+    const result = await fetchJson('/api/jobs/auto-search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const updated = await loadOpportunities();
+    const imported = result.opportunities_imported || 0;
+    const failures = (result.providers || []).filter((provider) => provider.error).map((provider) => provider.provider).join('、');
+    const suffix = failures ? `；${failures} 暂不可用` : '';
+    setSearchStatus(`更新完成：本次整理 ${imported} 条，当前匹配 ${updated.count || 0} 条${suffix}`, 'success');
+    localStorage.setItem('jobRadarLastRefreshDate', new Date().toISOString().slice(0, 10));
+  } catch (error) {
+    setSearchStatus(`本地结果已显示；联网更新失败：${error.message}`, 'error');
+  } finally {
+    setLoading(false);
+  }
+}
+
 function profile() {
-  const cities = $('targetCities').value.split(',').map(s => s.trim()).filter(Boolean);
   const max = $('maxWrittenBurden').value;
   return {
     graduation_date: $('graduationDate').value || null,
     school_region: $('schoolRegion').value,
     degree: $('degree').value,
-    target_cities: cities,
+    target_cities: $('targetCities').value.split(',').map((value) => value.trim()).filter(Boolean),
     max_written_test_burden: max === '' ? null : Number(max),
   };
 }
 
-function searchFilters() {
-  const params = new URLSearchParams();
-  const query = $('query').value.trim();
-  const city = $('city').value.trim();
-  const cohort = $('cohort').value.trim();
-  const accepts = $('acceptsOverseas').value;
-  if (query) params.set('query', query);
-  if (city) params.set('city', city);
-  if (cohort) params.set('cohort', cohort);
-  if (accepts) params.set('accepts_overseas', accepts);
-  return params;
-}
-
-async function loadSignals() {
-  const res = await fetch('/api/signals');
-  const data = await res.json();
-  $('signals').innerHTML = data.items.map(signalCard).join('') || '<p class="subtle">暂无信号</p>';
-}
-
-function signalCard(s) {
-  const sourceLink = s.source_url ? `<p class="subtle">${escapeHtml(s.source_url)}</p>` : '';
-  return `<article class="card">
-    <h3>${escapeHtml(s.title)}</h3>
-    <div class="meta">
-      <span class="tag">${escapeHtml(s.company_name || '未知公司')}</span>
-      <span class="tag">${escapeHtml(s.signal_type)}</span>
-      <span class="tag good">来源 ${escapeHtml(s.source_level)}</span>
-      <span class="tag warn">${escapeHtml(s.status)}</span>
-    </div>
-    <p>${escapeHtml(s.description || '')}</p>
-    <p class="subtle">${escapeHtml(s.evidence_text || '')}</p>
-    ${sourceLink}
-  </article>`;
-}
-
-async function loadJobs() {
-  const params = searchFilters();
-  const res = await fetch('/api/jobs?' + params.toString());
-  const data = await res.json();
-  $('count').textContent = `${data.count} 条`;
-  $('jobs').innerHTML = data.items.map(job => jobCard(job)).join('') || '<p class="subtle">没有匹配岗位</p>';
+function matchedOpportunity(item) {
+  const job = item.job;
+  return {
+    id: `job-${job.id}`,
+    record_type: 'job',
+    job_id: job.id,
+    campaign_id: job.campaign?.id,
+    updated_at: job.last_verified_at,
+    company_name: job.company?.name || '未知公司',
+    company_type: job.company?.company_type || 'unknown',
+    industry: job.company?.industry || 'unknown',
+    title: job.title,
+    campaign_name: job.campaign?.name || '',
+    recruitment_type: job.campaign?.recruitment_type,
+    target_cohort: job.campaign?.target_cohort,
+    cities: job.cities || [],
+    degree_min: job.degree_min,
+    deadline: job.campaign?.deadline,
+    status: job.status,
+    apply_url: job.apply_url,
+    source_url: job.source_url,
+    source_domain: job.source_url ? new URL(job.source_url).hostname : '',
+    source_level: job.source_level,
+    quality_score: job.quality_score,
+    risk_level: job.risk_level,
+    match: item.match,
+  };
 }
 
 async function runMatch() {
-  const filters = Object.fromEntries(searchFilters().entries());
-  if (filters.max_written_test_burden) filters.max_written_test_burden = Number(filters.max_written_test_burden);
-  const res = await fetch('/api/match', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ profile: profile(), filters }),
-  });
-  const data = await res.json();
-  $('count').textContent = `${data.count} 条，已按画像判断`;
-  $('jobs').innerHTML = data.items.map(item => jobCard(item.job, item.match)).join('') || '<p class="subtle">没有匹配岗位</p>';
-}
-
-function jobCard(job, match) {
-  const statusClass = match ? matchClass(match.status) : '';
-  const matchTag = match ? `<span class="tag ${statusClass}">${matchLabel(match.status)} ${Math.round(match.score * 100)}%</span>` : '<span class="tag">未匹配</span>';
-  const process = job.process_rule || {};
-  const campaign = job.campaign || {};
-  const company = job.company || {};
-  const companyName = company.name || '未知公司';
-  const cityText = (job.cities || []).join(' / ') || '城市未知';
-  const deadline = campaign.deadline || '未知';
-  const degree = degreeLabel(job.degree_min || campaign.degree_min || '');
-  const burden = Number(process.written_test_burden ?? 5);
-  const burdenClass = burden <= 1 ? 'good' : burden >= 4 ? 'bad' : 'warn';
-  const applyUrl = job.apply_url || job.source_url || campaign.apply_url || campaign.source_url || '';
-  const sourceUrl = job.source_url || campaign.source_url || '';
-  const sourceAction = sourceUrl && sourceUrl !== applyUrl ? `<a class="button ghost" href="${escapeHtml(sourceUrl)}" target="_blank" rel="noopener">原文</a>` : '';
-  return `<article class="card job-card">
-    <div class="job-main">
-      <div class="job-topline">
-        <div class="job-title-block">
-          <div class="job-title-row">
-            <h3 class="job-title">${escapeHtml(job.title || '待命名岗位')}</h3>
-            ${matchTag}
-          </div>
-          <p class="job-company">${escapeHtml(companyName)}<span>${escapeHtml(campaign.name || '未知招聘项目')}</span></p>
-        </div>
-        <div class="job-deadline">
-          <span>截止</span>
-          <strong>${escapeHtml(deadline)}</strong>
-        </div>
-      </div>
-      <div class="job-facts">
-        <span>${escapeHtml(cityText)}</span>
-        <span>${escapeHtml(campaign.target_cohort || '未知届别')}</span>
-        <span>${escapeHtml(campaign.recruitment_type || '未知类型')}</span>
-        <span>${escapeHtml(degree)}</span>
-        <span class="${burdenClass}">笔试负担 ${escapeHtml(burden)}</span>
-        <span>来源 ${escapeHtml(job.source_level || 'C')}</span>
-      </div>
-      <p class="job-description">${escapeHtml(job.description || '暂无岗位说明，建议打开原文复核。')}</p>
-      <p class="subtle">海外：${campaign.accepts_overseas === true ? '接受' : campaign.accepts_overseas === false ? '未显示接受' : '未知'}</p>
-      ${match ? renderMatch(match) : ''}
-    </div>
-    <div class="job-actions">
-      ${applyUrl ? `<a class="button primary" href="${escapeHtml(applyUrl)}" target="_blank" rel="noopener">去申请</a>` : ''}
-      ${sourceAction}
-      <button class="ghost" onclick="showDetail(${job.id})">证据</button>
-    </div>
-  </article>`;
-}
-
-function renderMatch(match) {
-  const reasons = (match.reasons || []).map(x => `<li>${escapeHtml(x)}</li>`).join('');
-  const risks = (match.risks || []).map(x => `<li>${escapeHtml(x)}</li>`).join('');
-  const blockers = (match.blockers || []).map(x => `<li>${escapeHtml(x)}</li>`).join('');
-  return `<div>
-    ${reasons ? `<p><b>匹配原因</b></p><ul class="reason-list">${reasons}</ul>` : ''}
-    ${risks ? `<p><b>风险或未知</b></p><ul class="reason-list">${risks}</ul>` : ''}
-    ${blockers ? `<p><b>不匹配原因</b></p><ul class="reason-list">${blockers}</ul>` : ''}
-  </div>`;
+  setSearchStatus('正在按画像匹配具体岗位...');
+  try {
+    const filters = Object.fromEntries(searchParams().entries());
+    delete filters.include_expired;
+    delete filters.limit;
+    const data = await fetchJson('/api/match', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: profile(), filters }),
+    });
+    const items = (data.items || []).map(matchedOpportunity);
+    renderOpportunities(items);
+    $('resultSummary').textContent = `共 ${items.length} 个具体岗位，已按画像判断`;
+    setSearchStatus(`画像匹配完成：${items.length} 个具体岗位`, 'success');
+    switchView('opportunities');
+  } catch (error) {
+    setSearchStatus(error.message, 'error');
+  }
 }
 
 async function showDetail(jobId) {
-  const res = await fetch(`/api/jobs/${jobId}`);
-  const job = await res.json();
-  const evidence = (job.evidence || []).map(e => `<li><b>${escapeHtml(e.field_name)}</b>：${escapeHtml(e.value_text || '')}<br><span class="subtle">${escapeHtml(e.evidence_text || '')}</span></li>`).join('');
-  const changes = (job.changes || []).map(c => `<li>${escapeHtml(c.detected_at)}：${escapeHtml(c.field_name)} 从 ${escapeHtml(c.old_value || '空')} 改为 ${escapeHtml(c.new_value || '空')}</li>`).join('');
-  $('detailContent').innerHTML = `<h2>${escapeHtml(job.title)}</h2>
-    <p>${escapeHtml(job.company.name)} ｜ ${escapeHtml(job.campaign.name)}</p>
-    <h3>流程说明</h3><p>${escapeHtml(job.process_rule.process_text || '暂无')}</p>
-    <h3>证据</h3><ul>${evidence || '<li>暂无证据，需人工复核。</li>'}</ul>
-    <h3>变化记录</h3><ul>${changes || '<li>暂无变化记录。</li>'}</ul>`;
-  $('detailDialog').showModal();
+  try {
+    const job = await fetchJson(`/api/jobs/${jobId}`);
+    const evidence = (job.evidence || []).map((entry) => `<li><strong>${escapeHtml(entry.field_name)}</strong>：${escapeHtml(entry.value_text || '')}<br><span class="cell-sub">${escapeHtml(entry.evidence_text || '')}</span></li>`).join('');
+    const changes = (job.changes || []).map((entry) => `<li>${escapeHtml(formatDate(entry.detected_at))}：${escapeHtml(entry.field_name)}从 ${escapeHtml(entry.old_value || '空')} 改为 ${escapeHtml(entry.new_value || '空')}</li>`).join('');
+    $('detailContent').innerHTML = `<h3>${escapeHtml(job.title)}</h3>
+      <p>${escapeHtml(job.company?.name || '')} · ${escapeHtml(job.campaign?.name || '')}</p>
+      <h3>流程</h3><p>${escapeHtml(job.process_rule?.process_text || '公告未注明')}</p>
+      <h3>来源证据</h3><ul>${evidence || '<li>暂无岗位级证据，请打开公告核对。</li>'}</ul>
+      <h3>变化记录</h3><ul>${changes || '<li>暂无变化记录。</li>'}</ul>`;
+    $('detailDialog').showModal();
+  } catch (error) {
+    setSearchStatus(error.message, 'error');
+  }
 }
 
 async function importText() {
-  const body = {
-    company_name: $('importCompany').value,
-    job_title: $('importTitle').value,
-    source_url: $('importUrl').value,
-    source_level: $('importSourceLevel').value,
-    text: $('importText').value,
-  };
-  const res = await fetch('/api/admin/import-text', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  $('importResult').textContent = JSON.stringify(data, null, 2);
-  await Promise.all([loadSignals(), loadJobs()]);
-}
-
-function matchClass(status) {
-  if (status === 'eligible') return 'good';
-  if (status === 'not_eligible') return 'bad';
-  return 'warn';
-}
-function matchLabel(status) {
-  return { eligible: '可投', maybe: '可能可投', not_eligible: '不适合', unknown: '未知' }[status] || status;
-}
-function degreeLabel(value) {
-  return {
-    associate: '专科',
-    bachelor: '本科',
-    master: '硕士',
-    phd: '博士',
-  }[value] || value || '学历未知';
-}
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>'"]/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[ch]));
-}
-async function fetchJson(url, options) {
-  const res = await fetch(url, options);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.detail || data.error || `请求失败：${res.status}`);
+  const text = $('importText').value.trim();
+  const company = $('importCompany').value.trim();
+  if (!company || text.length < 20) {
+    $('importStatus').textContent = '请填写公司和至少 20 个字的公告正文。';
+    return;
   }
-  return data;
-}
-function showResult(id, value) {
-  const el = $(id);
-  if (!el) return;
-  el.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-}
-function formatAutoImportResult(data) {
-  const jobMap = new Map((data.jobs || []).map(job => [String(job.id), job]));
-  const lines = [
-    `搜索词：${data.keyword || ''}`,
-    `信息源：${sourceScopeLabel(data.source_scope || 'all')}`,
-    `总计：找到 ${data.count || 0} 条，成功导入 ${data.imported || 0} 条，生成岗位 ${data.jobs_imported || 0} 个`,
-  ];
-  for (const provider of data.providers || []) {
-    const label = {
-      google: 'Google',
-      bing: 'Bing',
-      sogou: '搜狗微信',
-      official_catalog: '官方目录',
-    }[provider.provider] || provider.provider;
-    lines.push(`${label}：找到 ${provider.count || 0} 条，导入 ${provider.imported || 0} 条，生成岗位 ${provider.jobs_imported || 0} 个${provider.error ? `，失败：${provider.error}` : ''}`);
-    for (const item of provider.items || []) {
-      if (item.imported) {
-        const type = item.candidate_type === 'wechat_article' ? '公众号文章' : '招聘信号';
-        lines.push(`  已导入${type}：${item.canonical_url}`);
-        const summaries = (item.job_ids || []).map(id => jobMap.get(String(id))).filter(Boolean);
-        if (summaries.length) {
-          lines.push('    已生成岗位：');
-          for (const job of summaries) lines.push(`      ${formatImportedJob(job)}`);
-        } else if ((item.job_ids || []).length) {
-          lines.push(`    已生成岗位 ID：${item.job_ids.join(', ')}`);
-        }
-      } else if (item.error) {
-        lines.push(`  未导入：${item.canonical_url || item.url} ｜ ${item.error}`);
-      }
-    }
+  try {
+    await fetchJson('/api/admin/import-text', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        company_name: company,
+        job_title: $('importTitle').value.trim() || '招聘项目',
+        source_url: $('importUrl').value.trim() || null,
+        source_level: 'C',
+        text,
+      }),
+    });
+    $('importStatus').textContent = '已解析并加入机会库。';
+    await loadOpportunities();
+  } catch (error) {
+    $('importStatus').textContent = error.message;
   }
-  return lines.join('\n');
-}
-function formatImportedJob(job) {
-  const city = (job.cities || []).join(' / ') || '城市未知';
-  const deadline = job.deadline || '截止未知';
-  return `${job.title || '待命名岗位'} ｜ ${job.company_name || '未知公司'} ｜ ${city} ｜ ${deadline}`;
-}
-function sourceScopeLabel(value) {
-  return {
-    all: '综合',
-    official: '企业官网',
-    job_boards: '招聘平台',
-    open_web: '开源/社区',
-    university: '高校就业网',
-    wechat: '公众号',
-  }[value] || value;
 }
 
-$('searchBtn').addEventListener('click', async () => {
-  await loadJobs();
-  switchTab('jobs');
-});
-$('runMatch').addEventListener('click', async () => {
-  await runMatch();
-  switchTab('jobs');
-});
-$('refreshSignals').addEventListener('click', loadSignals);
-$('importBtn').addEventListener('click', importText);
-$('closeDialog').addEventListener('click', () => $('detailDialog').close());
-
-loadSignals();
-loadJobs();
-
-function wechatParams() {
+function articleParams() {
   const params = new URLSearchParams();
-  const q = $('wechatQuery')?.value?.trim() || '';
-  const freshness = $('wechatFreshnessDays')?.value || '45';
-  const minSource = $('wechatMinSourceLevel')?.value || '';
-  const trusted = $('wechatTrustedOnly')?.value || 'false';
-  if (q) params.set('q', q);
-  params.set('freshness_days', freshness);
-  if (minSource) params.set('min_source_level', minSource);
-  params.set('trusted_only', trusted);
+  const query = $('articleQuery').value.trim();
+  if (query) params.set('q', query);
+  params.set('freshness_days', $('articleFreshness').value || '90');
+  params.set('trusted_only', 'false');
+  params.set('limit', '100');
   return params;
 }
 
-async function loadWechatArticles() {
-  if (!$('wechatResults')) return;
-  const res = await fetch('/api/wechat/articles?' + wechatParams().toString());
-  const data = await res.json();
-  $('wechatResults').innerHTML = data.items.map(wechatArticleCard).join('') || '<p class="subtle">暂无匹配公众号文章。可以先导入 HTML，或由后台发现任务补充。</p>';
-}
-
-function wechatArticleCard(article) {
-  const stale = article.is_stale ? '<span class="tag warn">可能过期</span>' : '<span class="tag good">新鲜</span>';
-  const blocked = article.is_blocked_source ? '<span class="tag bad">低质来源</span>' : '';
-  return `<article class="card">
-    <h3>${escapeHtml(article.title)}</h3>
-    <div class="meta">
-      ${stale}
-      ${blocked}
-      <span class="tag">${escapeHtml(article.account_name || '未知公众号')}</span>
-      <span class="tag">来源 ${escapeHtml(article.source_level || 'C')}</span>
-      <span class="tag">质量 ${Math.round((article.quality_score || 0) * 100)}%</span>
-      <span class="tag">新鲜度 ${Math.round((article.freshness_score || 0) * 100)}%</span>
-    </div>
-    <p>${escapeHtml(article.digest || (article.content_text || '').slice(0, 180))}</p>
-    <p class="subtle">发布时间：${escapeHtml(article.publish_at || '未知')} ｜ 首次发现：${escapeHtml(article.first_seen_at || '')}</p>
-    <p class="subtle">${escapeHtml(article.canonical_url)}</p>
+function renderArticle(item) {
+  const link = item.canonical_url ? `<a href="${escapeHtml(item.canonical_url)}" target="_blank" rel="noopener">查看原文</a>` : '';
+  return `<article class="article-row">
+    <h3>${escapeHtml(item.title)}</h3>
+    <div class="article-meta"><span class="tag">${escapeHtml(item.account_name || '公众号未知')}</span><span class="tag source-${String(item.source_level || 'C').toLowerCase()}">来源 ${escapeHtml(item.source_level || 'C')}</span><span class="tag ${item.is_stale ? 'warn' : 'good'}">${item.is_stale ? '可能过期' : '新鲜'}</span></div>
+    <p>${escapeHtml(item.digest || (item.content_text || '').slice(0, 180))}</p>
+    <p>${escapeHtml(formatDate(item.publish_at, '发布时间未知'))} · ${link}</p>
   </article>`;
 }
 
-async function loadWechatSources() {
-  if (!$('wechatSources')) return;
-  const res = await fetch('/api/wechat/sources');
-  const data = await res.json();
-  $('wechatSources').innerHTML = data.items.map(s => `<span class="tag ${s.trust_level === 'S' || s.trust_level === 'A' ? 'good' : ''}">${escapeHtml(s.name)} · ${escapeHtml(s.trust_level)} · ${s.enabled ? '启用' : '关闭'}</span>`).join('');
-}
-
-async function loadWechatConfig() {
-  if (!$('wechatConfigStatus')) return;
+async function loadArticles() {
   try {
-    const data = await fetchJson('/api/wechat/config');
-    const parts = [
-      data.personal_mode ? '<span class="tag good">个人本地模式</span>' : '<span class="tag warn">普通模式</span>',
-      data.public_fetch_enabled ? '<span class="tag good">文章抓取已开启</span>' : '<span class="tag warn">文章抓取未开启</span>',
-      data.web_search_import_enabled ? '<span class="tag good">网页搜索导入已开启</span>' : '<span class="tag warn">网页搜索导入未开启</span>',
-      data.sogou_discovery_enabled ? '<span class="tag good">搜狗联网已开启</span>' : '<span class="tag">搜狗联网未开启</span>',
-    ];
-    $('wechatConfigStatus').innerHTML = parts.join('');
-  } catch (err) {
-    $('wechatConfigStatus').innerHTML = `<span class="tag bad">${escapeHtml(err.message)}</span>`;
+    const data = await fetchJson(`/api/wechat/articles?${articleParams().toString()}`);
+    $('articleRows').innerHTML = (data.items || []).map(renderArticle).join('') || '<div class="empty-state"><h3>暂无匹配公众号文章</h3><p>可切换搜狗微信通道后执行联网更新。</p></div>';
+  } catch (error) {
+    $('articleRows').innerHTML = `<div class="empty-state"><h3>文章读取失败</h3><p>${escapeHtml(error.message)}</p></div>`;
   }
 }
 
-async function autoSearchImportWechat() {
-  const button = $('wechatAutoImportBtn');
-  const body = {
-    keyword: $('wechatDiscoverKeyword').value.trim(),
-    provider: $('wechatSearchProvider').value,
-    source_scope: $('sourceScope').value,
-    freshness_days: Number($('wechatDiscoverFreshness').value || 45),
-    max_results: Number($('wechatAutoImportLimit').value || 10),
-  };
-  if (!body.keyword) {
-    showResult('wechatQuickResult', '请先输入搜索词。');
+function switchView(name) {
+  document.querySelectorAll('.view-tab').forEach((button) => {
+    const active = button.dataset.view === name;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  const opportunitiesActive = name === 'opportunities';
+  $('opportunitiesView').classList.toggle('active', opportunitiesActive);
+  $('opportunitiesView').hidden = !opportunitiesActive;
+  $('articlesView').classList.toggle('active', !opportunitiesActive);
+  $('articlesView').hidden = opportunitiesActive;
+  if (!opportunitiesActive) loadArticles();
+}
+
+function clearPresetState() {
+  document.querySelectorAll('[data-preset]').forEach((button) => button.classList.remove('active'));
+}
+
+function resetFilters() {
+  $('query').value = '';
+  $('city').value = '';
+  $('cohort').value = '';
+  $('recruitmentType').value = '';
+  $('companyType').value = '';
+  $('industry').value = '';
+  $('sourceLevel').value = 'B';
+  $('includeExpired').checked = false;
+  clearPresetState();
+}
+
+async function applyPreset(name, button) {
+  resetFilters();
+  button.classList.add('active');
+  const campusYear = new Date().getMonth() + 1 >= 6 ? new Date().getFullYear() + 1 : new Date().getFullYear();
+  if (name === 'latest') {
+    $('query').value = '校园招聘';
+    $('freshnessDays').value = '1';
+  } else if (name === 'autumn') {
+    $('query').value = '秋招';
+    $('cohort').value = String(campusYear);
+    $('freshnessDays').value = '90';
+  } else if (name === 'soe') {
+    $('query').value = '校园招聘';
+    $('companyType').value = '国央企';
+  } else if (name === 'intern') {
+    $('query').value = '实习';
+    $('recruitmentType').value = '实习';
+  } else if (name === 'all') {
+    await runSearch({ refresh: false });
     return;
   }
-  showResult('wechatQuickResult', '正在用普通网页搜索查找招聘线索，并自动导入...');
-  if (button) button.disabled = true;
-  try {
-    const data = await fetchJson('/api/jobs/auto-search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    showResult('wechatQuickResult', formatAutoImportResult(data));
-    await Promise.all([loadSignals(), loadWechatArticles(), loadWechatConfig()]);
-    if ((data.jobs_imported || 0) > 0) {
-      await runMatch();
-      switchTab('jobs');
-    } else {
-      await loadJobs();
-      switchTab('signals');
-    }
-  } catch (err) {
-    showResult('wechatQuickResult', err.message);
-  } finally {
-    if (button) button.disabled = false;
-  }
+  await runSearch({ refresh: true });
 }
 
-async function openWechatSearch(provider) {
-  const keyword = $('wechatDiscoverKeyword').value.trim() || $('wechatQuery').value.trim() || '秋招';
-  const freshness = $('wechatDiscoverFreshness').value || '45';
-  const sourceScope = $('sourceScope')?.value || 'all';
-  const tab = window.open('about:blank', '_blank');
-  if (tab) tab.opener = null;
+async function openExternalSearch(provider) {
+  const keyword = $('query').value.trim() || '秋招';
+  const popup = window.open('about:blank', '_blank');
+  if (popup) popup.opener = null;
   try {
-    const data = await fetchJson(`/api/wechat/search-links?keyword=${encodeURIComponent(keyword)}&freshness_days=${encodeURIComponent(freshness)}&source_scope=${encodeURIComponent(sourceScope)}`);
+    const data = await fetchJson(`/api/wechat/search-links?keyword=${encodeURIComponent(keyword)}&freshness_days=${encodeURIComponent($('freshnessDays').value)}&source_scope=${encodeURIComponent($('sourceScope').value)}`);
     const url = data.urls?.[provider];
     if (!url) throw new Error('没有生成搜索链接');
-    if (tab) {
-      tab.location.href = url;
-    } else {
-      window.location.href = url;
-    }
-    const label = provider === 'google' ? 'Google' : provider === 'bing' ? 'Bing' : '搜狗微信';
-    showResult('wechatQuickResult', `已打开 ${label} 搜索页。`);
-  } catch (err) {
-    if (tab) tab.close();
-    showResult('wechatQuickResult', err.message);
+    if (popup) popup.location.href = url;
+    else window.location.href = url;
+  } catch (error) {
+    if (popup) popup.close();
+    setSearchStatus(error.message, 'error');
   }
 }
 
-$('wechatSearchBtn')?.addEventListener('click', async () => {
-  await loadWechatArticles();
-  switchTab('articles');
-});
-$('wechatSourcesBtn')?.addEventListener('click', loadWechatSources);
-$('wechatAutoImportBtn')?.addEventListener('click', autoSearchImportWechat);
-$('openGoogleBtn')?.addEventListener('click', () => openWechatSearch('google'));
-$('openBingBtn')?.addEventListener('click', () => openWechatSearch('bing'));
-$('openSogouBtn')?.addEventListener('click', () => openWechatSearch('sogou'));
-document.querySelectorAll('.tab').forEach(button => {
-  button.addEventListener('click', () => switchTab(button.dataset.tab));
-});
-initSplitter();
-loadWechatConfig();
-loadWechatSources();
-loadWechatArticles();
+async function loadStatus() {
+  try {
+    const [config, registry] = await Promise.all([
+      fetchJson('/api/wechat/config'),
+      fetchJson('/api/sources/registry'),
+    ]);
+    $('modeStatus').textContent = config.personal_mode ? '个人本地模式' : '本地模式';
+    $('modeStatus').classList.toggle('good', config.personal_mode);
+    $('registryStatus').textContent = `${registry.count || 0} 个正式来源`;
+    $('registryStatus').classList.add('good');
+    $('networkStatus').textContent = config.web_search_import_enabled ? '联网更新已开启' : '联网更新未开启';
+    $('networkStatus').classList.toggle('good', config.web_search_import_enabled);
+    $('networkStatus').classList.toggle('warn', !config.web_search_import_enabled);
+  } catch (error) {
+    $('networkStatus').textContent = '状态读取失败';
+    $('networkStatus').classList.add('warn');
+  }
+}
 
-function switchTab(name) {
-  const tabName = name || 'signals';
-  document.querySelectorAll('.tab').forEach(button => {
-    button.classList.toggle('active', button.dataset.tab === tabName);
-  });
-  const panels = {
-    signals: $('signalsPanel'),
-    jobs: $('jobsPanel'),
-    articles: $('articlesPanel'),
-  };
-  Object.entries(panels).forEach(([key, panel]) => {
-    panel?.classList.toggle('active', key === tabName);
-  });
+function setLeftWidth(width) {
+  const workspace = $('workspace');
+  const min = 310;
+  const max = Math.min(640, workspace.getBoundingClientRect().width - 460);
+  const next = Math.max(min, Math.min(max, width));
+  workspace.style.setProperty('--left-width', `${Math.round(next)}px`);
+  $('splitter').setAttribute('aria-valuenow', String(Math.round(next)));
+  localStorage.setItem('jobRadarLeftWidth', `${Math.round(next)}px`);
 }
 
 function initSplitter() {
   const workspace = $('workspace');
   const splitter = $('splitter');
-  if (!workspace || !splitter) return;
-  const saved = localStorage.getItem('jobRadarLeftWidth');
-  if (saved) workspace.style.setProperty('--left-width', saved);
+  const saved = Number.parseInt(localStorage.getItem('jobRadarLeftWidth') || '', 10);
+  if (Number.isFinite(saved)) setLeftWidth(saved);
   let dragging = false;
   splitter.addEventListener('pointerdown', (event) => {
     dragging = true;
@@ -424,18 +446,62 @@ function initSplitter() {
   });
   splitter.addEventListener('pointermove', (event) => {
     if (!dragging) return;
-    const rect = workspace.getBoundingClientRect();
-    const width = Math.min(Math.max(event.clientX - rect.left, 300), Math.min(640, rect.width - 420));
-    const value = `${Math.round(width)}px`;
-    workspace.style.setProperty('--left-width', value);
-    localStorage.setItem('jobRadarLeftWidth', value);
+    setLeftWidth(event.clientX - workspace.getBoundingClientRect().left);
   });
-  function stopDrag(event) {
-    if (!dragging) return;
+  const stop = () => {
     dragging = false;
-    try { splitter.releasePointerCapture(event.pointerId); } catch (_) {}
     document.body.classList.remove('is-resizing');
-  }
-  splitter.addEventListener('pointerup', stopDrag);
-  splitter.addEventListener('pointercancel', stopDrag);
+  };
+  splitter.addEventListener('pointerup', stop);
+  splitter.addEventListener('pointercancel', stop);
+  splitter.addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    event.preventDefault();
+    const current = Number.parseInt(getComputedStyle(workspace).getPropertyValue('--left-width'), 10) || 380;
+    setLeftWidth(current + (event.key === 'ArrowRight' ? 20 : -20));
+  });
 }
+
+function bindEvents() {
+  $('searchForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    clearPresetState();
+    await runSearch({ refresh: true });
+  });
+  $('resetFilters').addEventListener('click', async () => {
+    resetFilters();
+    await runSearch({ refresh: false });
+  });
+  $('runMatch').addEventListener('click', runMatch);
+  $('importButton').addEventListener('click', importText);
+  $('closeDialog').addEventListener('click', () => $('detailDialog').close());
+  $('searchArticles').addEventListener('click', loadArticles);
+  $('openGoogle').addEventListener('click', () => openExternalSearch('google'));
+  $('openBing').addEventListener('click', () => openExternalSearch('bing'));
+  $('openSogou').addEventListener('click', () => openExternalSearch('sogou'));
+  document.querySelectorAll('.view-tab').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
+  document.querySelectorAll('[data-preset]').forEach((button) => button.addEventListener('click', () => applyPreset(button.dataset.preset, button)));
+  document.querySelectorAll('[data-sort]').forEach((button) => button.addEventListener('click', () => {
+    const key = button.dataset.sort;
+    if (state.sortKey === key) state.sortDirection = state.sortDirection === 'asc' ? 'desc' : 'asc';
+    else {
+      state.sortKey = key;
+      state.sortDirection = key === 'updated_at' || key === 'deadline' || key === 'source_level' ? 'desc' : 'asc';
+    }
+    renderOpportunities(state.opportunities);
+  }));
+}
+
+async function init() {
+  const campusYear = new Date().getMonth() + 1 >= 6 ? new Date().getFullYear() + 1 : new Date().getFullYear();
+  $('autumnPreset').textContent = `${String(campusYear).slice(-2)}届热门秋招`;
+  initSplitter();
+  bindEvents();
+  loadStatus();
+  loadArticles();
+  const today = new Date().toISOString().slice(0, 10);
+  const shouldRefresh = localStorage.getItem('jobRadarLastRefreshDate') !== today;
+  await runSearch({ refresh: shouldRefresh });
+}
+
+init();

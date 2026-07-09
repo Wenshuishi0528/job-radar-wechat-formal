@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from services.api.app.database import init_db
-from services.api.app.repository import import_scraped_job, list_jobs
+from services.api.app.repository import import_scraped_job, list_jobs, list_opportunities
 from services.api.app.web_search_importer import (
     WebSearchCandidate,
     WebSearchImportError,
@@ -14,6 +14,7 @@ from services.api.app.web_search_importer import (
     extract_jobs_from_html,
     fetch_curated_official_results,
     fetch_sogou_results,
+    parse_google_news_results,
     parse_search_results,
 )
 
@@ -62,6 +63,25 @@ SOGOU_HTML = """
 </ul>
 </body></html>
 """
+
+
+GOOGLE_NEWS_RSS = """<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel>
+  <item>
+    <title>百度2027届校招正式启动 AI岗位占比超90% - 上观新闻</title>
+    <link>https://news.google.com/rss/articles/baidu-2027?oc=5</link>
+    <description>百度面向2027届毕业生启动校园招聘。</description>
+    <pubDate>Wed, 08 Jul 2026 12:00:00 GMT</pubDate>
+    <source url="https://www.jfdaily.com">上观新闻</source>
+  </item>
+  <item>
+    <title>2026校园招聘白皮书发布 - 某媒体</title>
+    <link>https://news.google.com/rss/articles/report?oc=5</link>
+    <description>行业趋势报告。</description>
+    <pubDate>Wed, 08 Jul 2026 11:00:00 GMT</pubDate>
+    <source url="https://example.net">某媒体</source>
+  </item>
+</channel></rss>"""
 
 
 CHNENERGY_JOBS_HTML = """
@@ -182,6 +202,19 @@ class PlainWebSearchImporterTest(unittest.TestCase):
         bing_items = parse_search_results("bing", BING_HTML, keyword="秋招")
         self.assertEqual(google_items[0].canonical_url, "https://mp.weixin.qq.com/s/campus-2027")
         self.assertEqual(bing_items[0].canonical_url, "https://mp.weixin.qq.com/s/bing-campus-2027")
+
+    def test_parse_google_news_rss_and_import_campaign(self):
+        candidates = parse_google_news_results(GOOGLE_NEWS_RSS, keyword="秋招", max_results=10)
+        self.assertEqual(candidates[0].title, "百度2027届校招正式启动 AI岗位占比超90%")
+        self.assertEqual(candidates[0].company_name, "百度")
+        self.assertEqual(candidates[0].candidate_type, "news_announcement")
+        with patch("services.api.app.web_search_importer.fetch_search_results", return_value=candidates):
+            result = auto_search_and_import("秋招", provider="google", source_scope="all", freshness_days=90, max_results=10)
+        self.assertEqual(result["campaigns_imported"], 1)
+        opportunities = list_opportunities({"query": "秋招", "limit": 20})
+        self.assertEqual(opportunities["count"], 1)
+        self.assertEqual(opportunities["items"][0]["company_name"], "百度")
+        self.assertEqual(opportunities["items"][0]["source_level"], "B")
 
     def test_parse_regular_recruiting_pages_as_signals(self):
         items = parse_search_results("google", OFFICIAL_HTML, keyword="秋招", source_scope="official")

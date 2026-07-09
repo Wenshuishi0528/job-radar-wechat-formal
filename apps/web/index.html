@@ -3,225 +3,294 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>校招雷达 MVP</title>
+  <title>校招雷达</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="/assets/styles.css" />
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <p class="eyebrow">Job Radar MVP</p>
-      <h1>校招雷达</h1>
-      <p class="subtle">多来源招聘信号、毕业时间匹配、笔试负担分和来源证据。</p>
+    <div class="brand">
+      <span class="brand-mark">JR</span>
+      <div>
+        <p>JOB RADAR</p>
+        <h1>校招雷达</h1>
+      </div>
     </div>
-    <div class="pill">演示数据</div>
+    <div class="top-status" aria-live="polite">
+      <span id="modeStatus" class="status-chip">本地模式</span>
+      <span id="registryStatus" class="status-chip">读取来源...</span>
+      <span id="networkStatus" class="status-chip">检查联网...</span>
+    </div>
   </header>
 
   <main id="workspace" class="workspace">
-    <aside id="settingsPane" class="settings-pane">
-      <section class="panel">
-        <div class="section-title">
-          <h2>自动搜索</h2>
-          <button id="wechatSourcesBtn" class="ghost">来源状态</button>
+    <aside class="settings-pane" aria-label="搜索与筛选设置">
+      <form id="searchForm" class="settings-section">
+        <div class="section-heading">
+          <h2>搜索条件</h2>
+          <button id="resetFilters" type="button" class="text-button">清空</button>
         </div>
-        <div id="wechatConfigStatus" class="status-strip">读取本地状态...</div>
-        <div class="grid two">
-          <label>搜索词
-            <input id="wechatDiscoverKeyword" value="秋招 海外" placeholder="秋招 / 提前批 / 免笔试" />
-          </label>
-          <label>信息源类型
-            <select id="sourceScope">
-              <option value="all" selected>综合</option>
-              <option value="official">企业官网</option>
-              <option value="job_boards">招聘平台</option>
-              <option value="open_web">开源/社区</option>
-              <option value="university">高校就业网</option>
-              <option value="wechat">公众号</option>
-            </select>
-          </label>
-          <label>搜索通道
-            <select id="wechatSearchProvider">
-              <option value="all" selected>全部通道</option>
-              <option value="both">Google + Bing</option>
-              <option value="google">Google</option>
-              <option value="bing">Bing</option>
-              <option value="sogou">搜狗微信</option>
-            </select>
-          </label>
-          <label>时间范围
-            <select id="wechatDiscoverFreshness">
-              <option value="7">近 7 天</option>
-              <option value="30">近 30 天</option>
-              <option value="45" selected>近 45 天</option>
-              <option value="90">近 90 天</option>
-              <option value="0">不限时间</option>
-            </select>
-          </label>
-          <label>最多导入
-            <select id="wechatAutoImportLimit">
-              <option value="5">5 条</option>
-              <option value="10" selected>10 条</option>
-              <option value="20">20 条</option>
-            </select>
-          </label>
-        </div>
-        <div class="button-row">
-          <button id="wechatAutoImportBtn" class="primary">自动搜索并导入</button>
-          <button id="openGoogleBtn">Google 查看</button>
-          <button id="openBingBtn">Bing 查看</button>
-          <button id="openSogouBtn">搜狗微信查看</button>
-        </div>
-        <pre id="wechatQuickResult"></pre>
-      </section>
 
-      <section class="panel">
-        <h2>我的画像</h2>
-        <div class="grid two">
-          <label>毕业年月
-            <input id="graduationDate" value="2026-08" placeholder="YYYY-MM" />
-          </label>
-          <label>学校地区
-            <select id="schoolRegion">
-              <option value="overseas">海外</option>
-              <option value="domestic">国内</option>
-              <option value="hmt">港澳台</option>
-              <option value="unknown">未知</option>
-            </select>
-          </label>
-          <label>学历
-            <select id="degree">
-              <option value="bachelor">本科</option>
-              <option value="master" selected>硕士</option>
-              <option value="phd">博士</option>
-              <option value="associate">专科</option>
-            </select>
-          </label>
-          <label>笔试负担上限
-            <select id="maxWrittenBurden">
-              <option value="">不限制</option>
-              <option value="0">0 只看明确免笔试</option>
-              <option value="1" selected>1 可接受无统一笔试</option>
-              <option value="2">2 可接受测评或个别岗位</option>
-              <option value="4">4 可接受笔试</option>
-            </select>
-          </label>
-        </div>
-        <label>目标城市，逗号分隔
-          <input id="targetCities" value="上海,北京" />
+        <label class="field field-wide">
+          <span>关键词</span>
+          <input id="query" value="秋招" placeholder="秋招 / 公司 / 岗位 / 专业" autocomplete="off" />
         </label>
-        <button id="runMatch" class="primary">按画像匹配岗位</button>
-      </section>
 
-      <section class="panel">
-        <h2>岗位筛选</h2>
-        <div class="grid two">
-          <label>关键词
-            <input id="query" placeholder="产品 / 央企 / 管培" />
+        <div class="field-grid">
+          <label class="field">
+            <span>城市</span>
+            <input id="city" placeholder="北京 / 上海" autocomplete="off" />
           </label>
-          <label>城市
-            <input id="city" placeholder="上海" />
+          <label class="field">
+            <span>届别</span>
+            <input id="cohort" placeholder="2027" inputmode="numeric" />
           </label>
-          <label>届别
-            <input id="cohort" placeholder="2026" />
-          </label>
-          <label>海外可投
-            <select id="acceptsOverseas">
+          <label class="field">
+            <span>招聘批次</span>
+            <select id="recruitmentType">
               <option value="">不限</option>
-              <option value="true">只看接受海外</option>
-              <option value="false">只看未标海外</option>
+              <option value="提前批">提前批</option>
+              <option value="秋招">秋招</option>
+              <option value="校招">校园招聘</option>
+              <option value="春招">春招</option>
+              <option value="实习">实习</option>
             </select>
           </label>
-        </div>
-        <button id="searchBtn">搜索岗位</button>
-      </section>
-
-      <details class="panel compact-admin">
-        <summary>手动导入公告文本</summary>
-        <div class="grid two">
-          <label>公司名
-            <input id="importCompany" value="示例新公司" />
-          </label>
-          <label>岗位名
-            <input id="importTitle" value="产品经理" />
-          </label>
-          <label>来源 URL
-            <input id="importUrl" value="https://example.com/new-notice" />
-          </label>
-          <label>来源等级
-            <select id="importSourceLevel">
-              <option value="S">S 官方招聘系统</option>
-              <option value="A">A 官方公众号/高校就业网</option>
-              <option value="B">B 聚合平台</option>
-              <option value="C" selected>C 用户投稿</option>
-            </select>
-          </label>
-        </div>
-        <textarea id="importText">示例新公司发布2026届春季校园招聘，面向海内外2025年9月至2026年8月毕业的本科及以上毕业生。工作地点上海、深圳。投递截止2026年8月20日。本次招聘不设置统一笔试，个别技术岗位可能单独通知。</textarea>
-        <button id="importBtn" class="primary">导入并解析</button>
-        <pre id="importResult"></pre>
-      </details>
-    </aside>
-
-    <div id="splitter" class="splitter" role="separator" aria-orientation="vertical"></div>
-
-    <section class="results-pane">
-      <div class="results-header">
-        <div>
-          <h2>结果</h2>
-          <span id="count" class="subtle"></span>
-        </div>
-        <div class="tabs">
-          <button class="tab active" data-tab="signals">招聘信号</button>
-          <button class="tab" data-tab="jobs">岗位</button>
-          <button class="tab" data-tab="articles">公众号文章</button>
-        </div>
-      </div>
-      <div id="wechatSources" class="source-box"></div>
-      <section id="signalsPanel" class="tab-panel active">
-        <div class="section-title">
-          <h3>招聘信号</h3>
-          <button id="refreshSignals" class="ghost">刷新</button>
-        </div>
-        <div id="signals" class="signal-list"></div>
-      </section>
-      <section id="jobsPanel" class="tab-panel">
-        <div id="jobs" class="job-list"></div>
-      </section>
-      <section id="articlesPanel" class="tab-panel">
-        <div class="grid four compact-filter">
-          <label>文章关键词
-            <input id="wechatQuery" value="秋招 海外" placeholder="秋招 / 提前批 / 免笔试" />
-          </label>
-          <label>新鲜度
-            <select id="wechatFreshnessDays">
-              <option value="7">近 7 天</option>
-              <option value="30">近 30 天</option>
-              <option value="45" selected>近 45 天</option>
-              <option value="90">近 90 天</option>
-              <option value="0">不限时间</option>
-            </select>
-          </label>
-          <label>来源等级
-            <select id="wechatMinSourceLevel">
+          <label class="field">
+            <span>企业类型</span>
+            <select id="companyType">
               <option value="">不限</option>
+              <option value="国央企">国企 / 央企</option>
+              <option value="央企">央企</option>
+              <option value="国企">国企</option>
+              <option value="民企">民企</option>
+              <option value="外企">外企</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>行业</span>
+            <select id="industry">
+              <option value="">不限</option>
+              <option value="互联网">互联网</option>
+              <option value="能源">能源电力</option>
+              <option value="汽车">汽车</option>
+              <option value="金融">金融</option>
+              <option value="半导体">半导体</option>
+              <option value="通信">通信</option>
+              <option value="游戏">游戏</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>最低来源</span>
+            <select id="sourceLevel">
+              <option value="">不限</option>
+              <option value="B" selected>B 以上</option>
               <option value="A">A 以上</option>
               <option value="S">只看 S</option>
             </select>
           </label>
-          <label>可信过滤
-            <select id="wechatTrustedOnly">
-              <option value="false">平衡模式</option>
-              <option value="true">只看 S/A</option>
+        </div>
+
+        <label class="check-row">
+          <input id="includeExpired" type="checkbox" />
+          <span>显示已截止项目</span>
+        </label>
+
+        <button id="searchButton" class="primary-button" type="submit">搜索并刷新</button>
+        <p id="searchStatus" class="search-status" role="status">准备就绪</p>
+      </form>
+
+      <details class="settings-section settings-details">
+        <summary>联网与来源</summary>
+        <label class="check-row network-toggle">
+          <input id="onlineRefresh" type="checkbox" checked />
+          <span>搜索时自动联网更新</span>
+        </label>
+        <div class="field-grid">
+          <label class="field">
+            <span>搜索通道</span>
+            <select id="searchProvider">
+              <option value="google" selected>Google 招聘资讯</option>
+              <option value="both">Google + Bing</option>
+              <option value="all">Google + Bing + 搜狗</option>
+              <option value="bing">Bing</option>
+              <option value="sogou">搜狗微信</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>来源范围</span>
+            <select id="sourceScope">
+              <option value="all" selected>综合</option>
+              <option value="official">企业官网</option>
+              <option value="job_boards">招聘平台</option>
+              <option value="university">高校就业网</option>
+              <option value="wechat">公众号</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>更新范围</span>
+            <select id="freshnessDays">
+              <option value="1">近 24 小时</option>
+              <option value="7">近 7 天</option>
+              <option value="30">近 30 天</option>
+              <option value="90" selected>近 90 天</option>
+              <option value="180">近 180 天</option>
+              <option value="0">不限时间</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>最多发现</span>
+            <select id="maxResults">
+              <option value="20">20 条</option>
+              <option value="50" selected>50 条</option>
+              <option value="100">100 条</option>
             </select>
           </label>
         </div>
-        <button id="wechatSearchBtn" class="primary">搜索文章索引</button>
-        <div id="wechatResults" class="job-list"></div>
+        <div class="external-search-row">
+          <button id="openGoogle" type="button" class="secondary-button">Google 查看</button>
+          <button id="openBing" type="button" class="secondary-button">Bing 查看</button>
+          <button id="openSogou" type="button" class="secondary-button">搜狗微信查看</button>
+        </div>
+      </details>
+
+      <details class="settings-section settings-details">
+        <summary>个人匹配设置</summary>
+        <div class="field-grid profile-grid">
+          <label class="field">
+            <span>毕业年月</span>
+            <input id="graduationDate" value="2027-06" placeholder="YYYY-MM" />
+          </label>
+          <label class="field">
+            <span>学校地区</span>
+            <select id="schoolRegion">
+              <option value="domestic">国内</option>
+              <option value="overseas" selected>海外</option>
+              <option value="hmt">港澳台</option>
+              <option value="unknown">未知</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>学历</span>
+            <select id="degree">
+              <option value="associate">专科</option>
+              <option value="bachelor">本科</option>
+              <option value="master" selected>硕士</option>
+              <option value="phd">博士</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>笔试负担</span>
+            <select id="maxWrittenBurden">
+              <option value="">不限制</option>
+              <option value="0">只看免笔试</option>
+              <option value="1" selected>无统一笔试</option>
+              <option value="2">接受测评</option>
+              <option value="4">接受笔试</option>
+            </select>
+          </label>
+        </div>
+        <label class="field field-wide">
+          <span>目标城市</span>
+          <input id="targetCities" value="上海,北京" />
+        </label>
+        <button id="runMatch" type="button" class="secondary-button full-width">按画像匹配具体岗位</button>
+      </details>
+
+      <details class="settings-section settings-details">
+        <summary>手动补充公告</summary>
+        <label class="field field-wide"><span>公司</span><input id="importCompany" /></label>
+        <label class="field field-wide"><span>岗位或项目</span><input id="importTitle" /></label>
+        <label class="field field-wide"><span>公告链接</span><input id="importUrl" type="url" /></label>
+        <label class="field field-wide"><span>公告正文</span><textarea id="importText"></textarea></label>
+        <button id="importButton" type="button" class="secondary-button full-width">解析并加入</button>
+        <p id="importStatus" class="search-status" role="status"></p>
+      </details>
+    </aside>
+
+    <div id="splitter" class="splitter" role="separator" aria-label="调整左右宽度" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="640" aria-valuenow="380" tabindex="0"></div>
+
+    <section class="results-pane">
+      <div class="results-topline">
+        <div>
+          <p class="section-kicker">CAMPUS OPPORTUNITIES</p>
+          <h2>网申表格</h2>
+          <p id="resultSummary" class="result-summary">正在读取...</p>
+        </div>
+        <div class="view-tabs" role="tablist" aria-label="结果视图">
+          <button class="view-tab active" type="button" role="tab" aria-selected="true" data-view="opportunities">网申机会</button>
+          <button class="view-tab" type="button" role="tab" aria-selected="false" data-view="articles">公众号文章</button>
+        </div>
+      </div>
+
+      <div class="preset-bar" aria-label="快速视图">
+        <button type="button" data-preset="latest">24h 最新</button>
+        <button id="autumnPreset" type="button" data-preset="autumn">秋招</button>
+        <button type="button" data-preset="soe">国企央企</button>
+        <button type="button" data-preset="intern">实习</button>
+        <button type="button" data-preset="all">全部</button>
+      </div>
+
+      <section id="opportunitiesView" class="result-view active" role="tabpanel">
+        <div class="table-wrap">
+          <table class="opportunity-table">
+            <colgroup>
+              <col class="col-updated" />
+              <col class="col-company" />
+              <col class="col-title" />
+              <col class="col-batch" />
+              <col class="col-location" />
+              <col class="col-deadline" />
+              <col class="col-source" />
+              <col class="col-actions" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th scope="col" data-sort-column="updated_at"><button class="sort-button" type="button" data-sort="updated_at">更新</button></th>
+                <th scope="col" data-sort-column="company_name"><button class="sort-button" type="button" data-sort="company_name">公司</button></th>
+                <th scope="col" data-sort-column="title"><button class="sort-button" type="button" data-sort="title">岗位 / 招聘项目</button></th>
+                <th scope="col" data-sort-column="recruitment_type"><button class="sort-button" type="button" data-sort="recruitment_type">批次</button></th>
+                <th scope="col">地点</th>
+                <th scope="col" data-sort-column="deadline"><button class="sort-button" type="button" data-sort="deadline">截止</button></th>
+                <th scope="col" data-sort-column="source_level"><button class="sort-button" type="button" data-sort="source_level">来源</button></th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody id="opportunityRows"></tbody>
+          </table>
+          <div id="emptyOpportunities" class="empty-state" hidden>
+            <h3>暂无匹配机会</h3>
+            <p>调整筛选后重新搜索，或开启联网更新。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="articlesView" class="result-view" role="tabpanel" hidden>
+        <div class="article-toolbar">
+          <label class="field">
+            <span>文章关键词</span>
+            <input id="articleQuery" value="秋招" />
+          </label>
+          <label class="field">
+            <span>新鲜度</span>
+            <select id="articleFreshness">
+              <option value="30">近 30 天</option>
+              <option value="90" selected>近 90 天</option>
+              <option value="0">不限时间</option>
+            </select>
+          </label>
+          <button id="searchArticles" type="button" class="secondary-button">搜索文章</button>
+        </div>
+        <div id="articleRows" class="article-list"></div>
       </section>
     </section>
   </main>
 
   <dialog id="detailDialog">
-    <button id="closeDialog" class="ghost close">关闭</button>
+    <div class="dialog-header">
+      <h2>岗位证据</h2>
+      <button id="closeDialog" type="button" class="text-button">关闭</button>
+    </div>
     <div id="detailContent"></div>
   </dialog>
 

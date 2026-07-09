@@ -55,4 +55,4 @@ class WechatAutoSearchImportRequest(BaseModel):
     provider: str = Field(default="all", description="all, google, bing, sogou, or both")
     source_scope: str = Field(default="all", description="all, official, job_boards, open_web, university, or wechat")
     freshness_days: int = Field(default=45, ge=0, le=3650)
-    max_results: int = Field(default=10, ge=1, le=20)
+    max_results: int = Field(default=30, ge=1, le=100)
