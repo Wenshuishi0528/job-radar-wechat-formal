@@ -13,9 +13,11 @@ from services.api.app.web_search_importer import (
     build_plain_search_url,
     extract_jobs_from_html,
     fetch_curated_official_results,
+    fetch_search_results,
     fetch_sogou_results,
     parse_google_news_results,
     parse_search_results,
+    _campaign_payload_from_candidate,
 )
 
 
@@ -62,6 +64,25 @@ SOGOU_HTML = """
 </li>
 </ul>
 </body></html>
+"""
+
+
+SOGOU_CURRENT_HTML = """
+<html><body><ul class="news-list">
+<li id="sogou_vr_11002601_box_0">
+  <a id="sogou_vr_11002601_img_0" href="/link?url=opaque-current"><img src="//img.example/cover.jpg"></a>
+  <div class="txt-box">
+    <a id="sogou_vr_11002601_title_0" href="/link?url=opaque-current"><em>2027届</em>星河科技校园招聘正式启动</a>
+    <p class="txt-info">面向应届毕业生开放算法工程师岗位，工作地点北京。</p>
+    <span class="all-time-y2">星河招聘</span><span><script>document.write(timeConvert('1783443600'))</script></span>
+  </div>
+</li>
+</ul></body></html>
+"""
+
+
+BING_UNRELATED_HTML = """
+<html><body><li class="b_algo"><h2><a href="https://www.zillow.com/careers/">Zillow</a></h2></li></body></html>
 """
 
 
@@ -138,7 +159,7 @@ CHNENERGY_STATION_LIST_HTML = """
     <p class="list-group-item-text">
       <span title="国能数智科技开发（北京）有限公司本部">国能数智科技开发（北京）有限公司本部</span>
       &nbsp;|&nbsp; <span title="电子信息类相关专业,计算机类相关专业,信息与通信工程类相关专业">电子信息类相关专业,计算机类相关专业,信...</span>
-      &nbsp;|&nbsp; 博士研究生 &nbsp;|&nbsp; 北京 &nbsp;|&nbsp; 2人
+      &nbsp;|&nbsp; 博士研究生 &nbsp;|&nbsp; 北京 &nbsp;|&nbsp; 2人 &nbsp; 报名截止日期：2027年8月31日
     </p>
   </li>
 </ul>
@@ -162,6 +183,9 @@ class FakeResponse:
 
     def get_content_charset(self):
         return "utf-8"
+
+    def geturl(self):
+        return "https://www.google.com/search?q=campus"
 
 
 class PlainWebSearchImporterTest(unittest.TestCase):
@@ -197,6 +221,13 @@ class PlainWebSearchImporterTest(unittest.TestCase):
         self.assertIn("https://zhaopin.chnenergy.com.cn/recTypeSerch?kinds=1", urls)
         self.assertEqual(items[0].provider, "official_catalog")
 
+    def test_curated_official_results_cover_broad_campus_search(self):
+        items = fetch_curated_official_results("秋招", source_scope="all", max_results=8)
+        names = {item.company_name for item in items}
+        self.assertEqual(len(items), 8)
+        self.assertIn("国家能源集团", names)
+        self.assertIn("国家电网", names)
+
     def test_parse_google_and_bing_results(self):
         google_items = parse_search_results("google", GOOGLE_HTML, keyword="秋招")
         bing_items = parse_search_results("bing", BING_HTML, keyword="秋招")
@@ -208,13 +239,51 @@ class PlainWebSearchImporterTest(unittest.TestCase):
         self.assertEqual(candidates[0].title, "百度2027届校招正式启动 AI岗位占比超90%")
         self.assertEqual(candidates[0].company_name, "百度")
         self.assertEqual(candidates[0].candidate_type, "news_announcement")
-        with patch("services.api.app.web_search_importer.fetch_search_results", return_value=candidates):
-            result = auto_search_and_import("秋招", provider="google", source_scope="all", freshness_days=90, max_results=10)
+        with patch("services.api.app.web_search_importer.fetch_curated_official_results", return_value=[]):
+            with patch("services.api.app.web_search_importer.fetch_search_results", return_value=candidates):
+                result = auto_search_and_import("秋招", provider="google", source_scope="all", freshness_days=90, max_results=10)
         self.assertEqual(result["campaigns_imported"], 1)
         opportunities = list_opportunities({"query": "秋招", "limit": 20})
         self.assertEqual(opportunities["count"], 1)
         self.assertEqual(opportunities["items"][0]["company_name"], "百度")
         self.assertEqual(opportunities["items"][0]["source_level"], "B")
+
+    def test_google_news_is_supplemented_by_regular_web_results(self):
+        news = WebSearchCandidate(
+            url="https://news.google.com/rss/articles/one",
+            canonical_url="https://news.google.com/rss/articles/one",
+            title="百度2027届校园招聘",
+            provider="google",
+            source_query="秋招",
+            candidate_type="news_announcement",
+        )
+        with patch("services.api.app.web_search_importer.fetch_google_news_results", return_value=[news]):
+            with patch("services.api.app.web_search_importer._open_url", return_value=FakeResponse(OFFICIAL_HTML)):
+                items = fetch_search_results("google", "秋招", max_results=5, source_scope="all")
+        urls = {item.canonical_url for item in items}
+        self.assertIn(news.canonical_url, urls)
+        self.assertIn("https://jobs.bytedance.com/campus/position/123", urls)
+
+    def test_news_campaign_extracts_structured_filter_fields(self):
+        candidate = WebSearchCandidate(
+            url="https://news.google.com/rss/articles/structured",
+            canonical_url="https://news.google.com/rss/articles/structured",
+            title="星河科技2027届校园招聘算法工程师",
+            snippet="面向计算机和人工智能专业本科生，工作地点北京，投递截止2026年8月31日。",
+            provider="google",
+            source_query="秋招",
+            candidate_type="news_announcement",
+            publisher="测试媒体",
+            publisher_url="https://media.example.org",
+            published_at="2026-07-09T08:00:00+00:00",
+        )
+        payload = _campaign_payload_from_candidate(candidate)
+        self.assertEqual(payload["company_name"], "星河科技")
+        self.assertEqual(payload["cities"], ["北京"])
+        self.assertEqual(payload["job_families"], ["技术"])
+        self.assertIn("计算机", payload["majors"])
+        self.assertEqual(payload["deadline"], "2026-08-31")
+        self.assertEqual(payload["source_published_at"], "2026-07-09T08:00:00+00:00")
 
     def test_parse_regular_recruiting_pages_as_signals(self):
         items = parse_search_results("google", OFFICIAL_HTML, keyword="秋招", source_scope="official")
@@ -254,6 +323,7 @@ class PlainWebSearchImporterTest(unittest.TestCase):
         self.assertEqual(jobs[0]["company_name"], "国能数智科技开发（北京）有限公司本部")
         self.assertEqual(jobs[0]["degree_min"], "phd")
         self.assertEqual(jobs[0]["cities"], ["北京"])
+        self.assertEqual(jobs[0]["deadline"], "2027-08-31")
 
     def test_job_search_expands_china_energy_alias(self):
         import_scraped_job({
@@ -284,9 +354,10 @@ class PlainWebSearchImporterTest(unittest.TestCase):
                 candidate_type="wechat_article",
             )
         ]
-        with patch("services.api.app.web_search_importer.fetch_search_results", return_value=candidates):
-            with patch("services.api.app.web_search_importer.ingest_url", return_value={"id": 123}):
-                result = auto_search_and_import("秋招", provider="google", freshness_days=45, max_results=5)
+        with patch("services.api.app.web_search_importer.fetch_curated_official_results", return_value=[]):
+            with patch("services.api.app.web_search_importer.fetch_search_results", return_value=candidates):
+                with patch("services.api.app.web_search_importer.ingest_url", return_value={"id": 123}):
+                    result = auto_search_and_import("秋招", provider="google", freshness_days=45, max_results=5)
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["imported"], 1)
         self.assertEqual(result["items"][0]["article_id"], 123)
@@ -298,6 +369,23 @@ class PlainWebSearchImporterTest(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].provider, "sogou")
         self.assertEqual(items[0].canonical_url, "https://mp.weixin.qq.com/s/sogou-campus-2027")
+
+    def test_fetch_sogou_results_supports_current_opaque_redirects(self):
+        with patch("urllib.request.urlopen", return_value=FakeResponse(SOGOU_CURRENT_HTML)):
+            with patch("time.sleep", return_value=None):
+                items = fetch_sogou_results("秋招", freshness_days=45, max_results=5)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].candidate_type, "news_announcement")
+        self.assertEqual(items[0].title, "2027届 星河科技校园招聘正式启动")
+        self.assertEqual(items[0].publisher, "星河招聘")
+        self.assertEqual(items[0].published_at, "2026-07-07 10:00:00")
+        self.assertIn("weixin.sogou.com/link", items[0].canonical_url)
+
+    def test_bing_unrelated_response_is_reported_as_degraded(self):
+        with patch("services.api.app.web_search_importer._open_url", return_value=FakeResponse(BING_UNRELATED_HTML)):
+            with patch("time.sleep", return_value=None):
+                with self.assertRaises(WebSearchImportError):
+                    fetch_search_results("bing", "秋招", max_results=5, source_scope="all")
 
     def test_all_provider_keeps_google_bing_and_sogou(self):
         def fake_fetch(provider, keyword, freshness_days=45, max_results=10, source_scope="all"):
@@ -312,9 +400,10 @@ class PlainWebSearchImporterTest(unittest.TestCase):
                 )
             ]
 
-        with patch("services.api.app.web_search_importer.fetch_search_results", side_effect=fake_fetch):
-            with patch("services.api.app.web_search_importer.ingest_url", return_value={"id": 123}):
-                result = auto_search_and_import("秋招", provider="all", freshness_days=45, max_results=5)
+        with patch("services.api.app.web_search_importer.fetch_curated_official_results", return_value=[]):
+            with patch("services.api.app.web_search_importer.fetch_search_results", side_effect=fake_fetch):
+                with patch("services.api.app.web_search_importer.ingest_url", return_value={"id": 123}):
+                    result = auto_search_and_import("秋招", provider="all", freshness_days=45, max_results=5)
         self.assertEqual([p["provider"] for p in result["providers"]], ["google", "bing", "sogou"])
         self.assertEqual(result["count"], 3)
         self.assertEqual(result["imported"], 3)
@@ -332,9 +421,10 @@ class PlainWebSearchImporterTest(unittest.TestCase):
                 candidate_type="web_signal",
             )
         ]
-        with patch("services.api.app.web_search_importer.fetch_search_results", return_value=candidates):
-            with patch("services.api.app.web_search_importer._import_jobs_from_candidate", return_value=[]):
-                result = auto_search_and_import("秋招", provider="google", source_scope="official", freshness_days=45, max_results=5)
+        with patch("services.api.app.web_search_importer.fetch_curated_official_results", return_value=[]):
+            with patch("services.api.app.web_search_importer.fetch_search_results", return_value=candidates):
+                with patch("services.api.app.web_search_importer._import_jobs_from_candidate", return_value=[]):
+                    result = auto_search_and_import("秋招", provider="google", source_scope="official", freshness_days=45, max_results=5)
         self.assertEqual(result["imported"], 1)
         self.assertEqual(result["items"][0]["signal_id"], 1)
 

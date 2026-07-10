@@ -12,12 +12,20 @@ CITY_KEYWORDS = [
 ]
 
 JOB_FAMILY_KEYWORDS = {
-    "产品": ["产品", "产品经理", "数据产品", "AI产品"],
-    "技术": ["研发", "算法", "工程师", "开发", "测试", "前端", "后端", "客户端", "嵌入式"],
+    "产品": ["产品经理", "产品运营", "产品策划", "产品岗", "数据产品", "AI产品"],
+    "技术": [
+        "研发", "算法", "工程师", "技术员", "技术岗", "开发", "测试", "前端", "后端",
+        "客户端", "嵌入式", "软件", "硬件", "运维", "信息化", "电气", "机械", "机电",
+        "采矿", "矿山", "地质", "通风", "工程管理",
+    ],
     "运营": ["运营", "用户运营", "内容运营", "活动运营"],
     "市场": ["市场", "品牌", "营销", "增长"],
-    "金融": ["投行", "研究", "交易", "风控", "量化", "金融"],
-    "职能": ["人力", "财务", "法务", "行政", "党务"],
+    "金融": ["投资银行", "投行", "证券研究", "行业研究", "投研", "交易员", "风控", "量化", "金融岗", "金融业务"],
+    "职能": [
+        "人力", "财务", "法务", "行政", "党务", "党建", "纪检", "审计", "采购", "招标",
+        "政策研究", "综合管理", "办公室", "负责人", "任务协调", "协调岗",
+    ],
+    "教育": ["教师", "教研", "辅导员", "教学", "课程研发"],
     "管培生": ["管培", "管理培训生", "储备干部"],
 }
 
@@ -149,9 +157,14 @@ def infer_degree(text: str) -> str:
 
 
 def infer_job_family(title: str, text: str) -> str:
-    haystack = title + "\n" + text[:1000]
+    # A role title is stronger evidence than a notice body, which often contains
+    # unrelated majors or product descriptions from the employer introduction.
     for family, keywords in JOB_FAMILY_KEYWORDS.items():
-        if any(keyword in haystack for keyword in keywords):
+        if any(keyword in title for keyword in keywords):
+            return family
+    context = text[:1000]
+    for family, keywords in JOB_FAMILY_KEYWORDS.items():
+        if any(keyword in context for keyword in keywords):
             return family
     return "unknown"
 

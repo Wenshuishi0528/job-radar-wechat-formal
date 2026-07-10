@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 from .change_detector import detect_changes
 from .database import get_connection, init_db
-from .extraction import ExtractedNotice
+from .extraction import ExtractedNotice, infer_job_family
 from .source_registry import ensure_source_registry
 from .wechat_articles import ensure_wechat_seed_data
 
@@ -32,6 +32,16 @@ def dumps_json(value: Any) -> str:
 
 def row_to_dict(row: Any) -> dict[str, Any]:
     return dict(row) if row is not None else {}
+
+
+def coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def ensure_seed_data() -> None:
@@ -115,6 +125,31 @@ def refresh_expired_statuses(today: str | None = None) -> int:
     return int(campaigns or 0) + int(jobs or 0)
 
 
+def refresh_job_families() -> int:
+    """Reclassify jobs after rule improvements without erasing useful manual labels."""
+    changed = 0
+    with get_connection() as conn:
+        rows = conn.execute("SELECT id, title, description, job_family FROM jobs").fetchall()
+        for row in rows:
+            current = row["job_family"] or "unknown"
+            inferred = infer_job_family(row["title"] or "", row["description"] or "")
+            if inferred != "unknown":
+                updated = inferred
+            elif current in {"产品", "金融"}:
+                # These two labels previously used overly broad words ("产品" and "研究").
+                updated = "unknown"
+            else:
+                updated = current
+            if updated != current:
+                conn.execute(
+                    "UPDATE jobs SET job_family=?, updated_at=? WHERE id=?",
+                    (updated, now_iso(), int(row["id"])),
+                )
+                changed += 1
+        conn.commit()
+    return changed
+
+
 def get_company_id_by_name(conn: Any, name: str) -> int | None:
     row = conn.execute("SELECT id FROM companies WHERE name = ?", (name,)).fetchone()
     return row[0] if row else None
@@ -162,9 +197,10 @@ def insert_campaign(conn: Any, company_id: int, campaign: dict[str, Any]) -> int
         """INSERT INTO campaigns (
             company_id, name, recruitment_type, target_cohort, status, start_date, deadline,
             domestic_grad_start, domestic_grad_end, overseas_grad_start, overseas_grad_end,
-            accepts_overseas, degree_min, application_rules, apply_url, source_url, source_level,
+            accepts_overseas, degree_min, cities_json, job_families_json, majors_json,
+            application_rules, apply_url, source_url, source_level, source_published_at,
             last_verified_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             company_id,
             campaign.get("name", "未知招聘项目"),
@@ -179,10 +215,14 @@ def insert_campaign(conn: Any, company_id: int, campaign: dict[str, Any]) -> int
             campaign.get("overseas_grad_end"),
             _bool_to_db(campaign.get("accepts_overseas")),
             campaign.get("degree_min", "bachelor"),
+            dumps_json(campaign.get("cities", [])),
+            dumps_json(campaign.get("job_families", [])),
+            dumps_json(campaign.get("majors", [])),
             campaign.get("application_rules"),
             campaign.get("apply_url"),
             campaign.get("source_url"),
             campaign.get("source_level", "C"),
+            campaign.get("source_published_at"),
             ts,
             ts,
             ts,
@@ -406,12 +446,12 @@ def list_jobs(filters: dict[str, Any]) -> list[dict[str, Any]]:
     accepts_overseas = filters.get("accepts_overseas")
     if accepts_overseas is not None:
         clauses.append("ca.accepts_overseas = ?")
-        params.append(1 if accepts_overseas else 0)
+        params.append(1 if coerce_bool(accepts_overseas) else 0)
     max_written_burden = filters.get("max_written_test_burden")
     if max_written_burden is not None:
         clauses.append("COALESCE(pr.written_test_burden, 5) <= ?")
         params.append(int(max_written_burden))
-    if filters.get("only_open", True):
+    if coerce_bool(filters.get("only_open"), default=True):
         clauses.append("j.status IN ('open', 'closing_soon')")
         clauses.append("(ca.deadline IS NULL OR date(ca.deadline) >= date('now'))")
     sql = _base_job_query() + " WHERE " + " AND ".join(clauses) + " ORDER BY ca.deadline IS NULL, ca.deadline ASC, j.quality_score DESC LIMIT ?"
@@ -497,9 +537,11 @@ def import_discovered_campaign(item: dict[str, Any]) -> dict[str, int]:
                 """,
                 (company_id, item.get("recruitment_type", "校招"), cohort),
             ).fetchone()
+        existing_campaign = None
         if existing:
             existing_campaign = conn.execute(
-                "SELECT name, target_cohort FROM campaigns WHERE id=?",
+                """SELECT name, target_cohort, degree_min, cities_json,
+                    job_families_json, majors_json FROM campaigns WHERE id=?""",
                 (int(existing["id"]),),
             ).fetchone()
             if existing_campaign and re.search(r"20\d{2}\s*届", existing_campaign["name"] or "") and not re.search(r"20\d{2}\s*届", campaign_name):
@@ -513,11 +555,25 @@ def import_discovered_campaign(item: dict[str, Any]) -> dict[str, int]:
             "start_date": item.get("start_date"),
             "deadline": item.get("deadline"),
             "accepts_overseas": item.get("accepts_overseas"),
-            "degree_min": item.get("degree_min", "bachelor"),
+            "degree_min": item.get("degree_min", "unknown"),
+            "cities": item.get("cities", []),
+            "job_families": item.get("job_families", []),
+            "majors": item.get("majors", []),
             "apply_url": item.get("apply_url"),
             "source_url": source_url,
             "source_level": item.get("source_level", "B"),
+            "source_published_at": item.get("source_published_at"),
         }
+        if existing_campaign:
+            for key, column in (
+                ("cities", "cities_json"),
+                ("job_families", "job_families_json"),
+                ("majors", "majors_json"),
+            ):
+                previous_values = loads_json(existing_campaign[column], [])
+                campaign_data[key] = list(dict.fromkeys([*previous_values, *campaign_data[key]]))
+            if campaign_data["degree_min"] == "unknown":
+                campaign_data["degree_min"] = existing_campaign["degree_min"] or "unknown"
         ts = now_iso()
         if existing:
             campaign_id = int(existing["id"])
@@ -525,8 +581,10 @@ def import_discovered_campaign(item: dict[str, Any]) -> dict[str, int]:
                 """
                 UPDATE campaigns SET name=?, recruitment_type=?, target_cohort=COALESCE(?, target_cohort),
                     status=?, start_date=COALESCE(?, start_date), deadline=COALESCE(?, deadline),
-                    degree_min=?, apply_url=COALESCE(?, apply_url), source_url=COALESCE(?, source_url),
-                    source_level=?, last_verified_at=?, updated_at=?
+                    degree_min=?, cities_json=?, job_families_json=?, majors_json=?,
+                    apply_url=COALESCE(?, apply_url), source_url=COALESCE(?, source_url),
+                    source_level=?, source_published_at=COALESCE(?, source_published_at),
+                    last_verified_at=?, updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -537,9 +595,13 @@ def import_discovered_campaign(item: dict[str, Any]) -> dict[str, int]:
                     campaign_data["start_date"],
                     campaign_data["deadline"],
                     campaign_data["degree_min"],
+                    dumps_json(campaign_data["cities"]),
+                    dumps_json(campaign_data["job_families"]),
+                    dumps_json(campaign_data["majors"]),
                     campaign_data["apply_url"],
                     source_url,
                     campaign_data["source_level"],
+                    campaign_data["source_published_at"],
                     ts,
                     ts,
                     campaign_id,
@@ -630,12 +692,15 @@ def list_opportunities(filters: dict[str, Any]) -> dict[str, Any]:
             """
             SELECT 'job' AS record_type, j.id AS record_id, j.id AS job_id, ca.id AS campaign_id,
                 j.title, ca.name AS campaign_name, c.name AS company_name, c.company_type, c.industry,
-                j.cities_json, j.degree_min, ca.recruitment_type, ca.target_cohort, ca.deadline,
+                CASE WHEN j.cities_json='[]' THEN ca.cities_json ELSE j.cities_json END AS cities_json,
+                j.degree_min, j.job_family, ca.job_families_json, j.majors_json,
+                ca.recruitment_type, ca.target_cohort, ca.deadline,
                 ca.accepts_overseas, j.status AS job_status, ca.status AS campaign_status,
                 COALESCE(j.apply_url, ca.apply_url) AS apply_url,
                 COALESCE(j.source_url, ca.source_url) AS source_url,
                 COALESCE(j.source_level, ca.source_level) AS source_level,
-                j.quality_score, j.risk_level, j.updated_at,
+                j.quality_score, j.risk_level, COALESCE(ca.source_published_at, j.updated_at) AS updated_at,
+                ca.source_published_at,
                 pr.written_test_status, pr.written_test_burden
             FROM jobs j
             JOIN campaigns ca ON ca.id=j.campaign_id
@@ -647,16 +712,27 @@ def list_opportunities(filters: dict[str, Any]) -> dict[str, Any]:
             """
             SELECT 'campaign' AS record_type, ca.id AS record_id, NULL AS job_id, ca.id AS campaign_id,
                 ca.name AS title, ca.name AS campaign_name, c.name AS company_name, c.company_type, c.industry,
-                '[]' AS cities_json, ca.degree_min, ca.recruitment_type, ca.target_cohort, ca.deadline,
+                ca.cities_json, ca.degree_min, 'unknown' AS job_family, ca.job_families_json,
+                ca.majors_json, ca.recruitment_type, ca.target_cohort, ca.deadline,
                 ca.accepts_overseas, ca.status AS job_status, ca.status AS campaign_status,
                 ca.apply_url, ca.source_url, ca.source_level, 0.68 AS quality_score,
-                'campaign_only' AS risk_level, ca.updated_at,
+                'campaign_only' AS risk_level, COALESCE(ca.source_published_at, ca.updated_at) AS updated_at,
+                ca.source_published_at,
                 'unknown' AS written_test_status, 5 AS written_test_burden
             FROM campaigns ca
             JOIN companies c ON c.id=ca.company_id
             WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.campaign_id=ca.id)
             """
         ).fetchall()
+        tracker_rows = conn.execute(
+            """SELECT record_type, record_id, status, is_favorite, note,
+                applied_at, next_action_at, created_at, updated_at
+            FROM application_tracker"""
+        ).fetchall()
+    tracker = {
+        (row["record_type"], int(row["record_id"])): row_to_dict(row)
+        for row in tracker_rows
+    }
     today = date.today().isoformat()
     items: list[dict[str, Any]] = []
     for row in [*job_rows, *campaign_rows]:
@@ -668,6 +744,10 @@ def list_opportunities(filters: dict[str, Any]) -> dict[str, Any]:
         elif status == "open" and not deadline and not data.get("target_cohort"):
             status = "pending_review"
         source_url = data.get("source_url") or ""
+        tracker_item = tracker.get((data["record_type"], int(data["record_id"])), {})
+        job_families = loads_json(data.get("job_families_json"), [])
+        if data.get("job_family") and data["job_family"] != "unknown" and data["job_family"] not in job_families:
+            job_families.insert(0, data["job_family"])
         items.append({
             "id": f"{data['record_type']}-{data['record_id']}",
             "record_type": data["record_type"],
@@ -682,6 +762,8 @@ def list_opportunities(filters: dict[str, Any]) -> dict[str, Any]:
             "recruitment_type": data.get("recruitment_type") or "unknown",
             "target_cohort": data.get("target_cohort"),
             "cities": loads_json(data.get("cities_json"), []),
+            "job_families": job_families,
+            "majors": loads_json(data.get("majors_json"), []),
             "degree_min": data.get("degree_min"),
             "deadline": deadline,
             "accepts_overseas": _db_to_bool(data.get("accepts_overseas")),
@@ -692,8 +774,15 @@ def list_opportunities(filters: dict[str, Any]) -> dict[str, Any]:
             "source_level": data.get("source_level") or "C",
             "quality_score": float(data.get("quality_score") or 0),
             "risk_level": data.get("risk_level") or "unknown",
+            "source_published_at": data.get("source_published_at"),
             "written_test_status": data.get("written_test_status") or "unknown",
             "written_test_burden": int(data.get("written_test_burden") if data.get("written_test_burden") is not None else 5),
+            "tracker_status": tracker_item.get("status"),
+            "is_favorite": bool(tracker_item.get("is_favorite")),
+            "tracker_note": tracker_item.get("note") or "",
+            "applied_at": tracker_item.get("applied_at"),
+            "next_action_at": tracker_item.get("next_action_at"),
+            "tracker_updated_at": tracker_item.get("updated_at"),
         })
     query = str(filters.get("query") or "").strip()
     if query:
@@ -703,7 +792,7 @@ def list_opportunities(filters: dict[str, Any]) -> dict[str, Any]:
             if any(term in " ".join([
                 item["company_name"], item["company_type"], item["industry"], item["title"],
                 item["campaign_name"], item["recruitment_type"], item.get("target_cohort") or "",
-                " ".join(item["cities"]),
+                " ".join(item["cities"]), " ".join(item["job_families"]), " ".join(item["majors"]),
             ]).lower() for term in terms)
         ]
     city = str(filters.get("city") or "").strip()
@@ -724,16 +813,27 @@ def list_opportunities(filters: dict[str, Any]) -> dict[str, Any]:
     industry = str(filters.get("industry") or "").strip()
     if industry:
         items = [item for item in items if industry in item["industry"]]
+    job_family = str(filters.get("job_family") or "").strip()
+    if job_family:
+        items = [item for item in items if any(job_family in value for value in item["job_families"]) or job_family in item["title"]]
+    major = str(filters.get("major") or "").strip()
+    if major:
+        items = [item for item in items if not item["majors"] or any(major in value for value in item["majors"])]
     source_level = str(filters.get("source_level") or "").strip()
     if source_level:
         ranks = {"S": 4, "A": 3, "B": 2, "C": 1, "D": 0}
         items = [item for item in items if ranks.get(item["source_level"], 0) >= ranks.get(source_level, 0)]
-    if not bool(filters.get("include_expired", False)):
+    if not coerce_bool(filters.get("include_expired")):
         items = [item for item in items if item["status"] not in {"closed", "expired"}]
     freshness_days = int(filters.get("freshness_days") or 0)
     if freshness_days > 0:
         cutoff = (date.today() - timedelta(days=freshness_days)).isoformat()
         items = [item for item in items if not item.get("updated_at") or str(item["updated_at"])[:10] >= cutoff]
+    tracker_status = str(filters.get("tracker_status") or "").strip()
+    if tracker_status:
+        items = [item for item in items if item.get("tracker_status") == tracker_status]
+    elif coerce_bool(filters.get("tracked_only")):
+        items = [item for item in items if item.get("tracker_status") or item.get("is_favorite")]
     items.sort(key=lambda item: (item.get("updated_at") or "", item.get("quality_score") or 0), reverse=True)
     total = len(items)
     offset = max(0, int(filters.get("offset") or 0))
@@ -747,6 +847,85 @@ def list_opportunities(filters: dict[str, Any]) -> dict[str, Any]:
         "offset": offset,
         "limit": limit,
     }
+
+
+TRACKER_STATUSES = {"saved", "preparing", "applied", "assessment", "interview", "offer", "rejected", "withdrawn"}
+ACTIVE_APPLICATION_STATUSES = {"applied", "assessment", "interview", "offer", "rejected", "withdrawn"}
+
+
+def save_tracker(
+    record_type: str,
+    record_id: int,
+    status: str,
+    note: str = "",
+    is_favorite: bool = False,
+    next_action_at: str | None = None,
+) -> dict[str, Any]:
+    ensure_seed_data()
+    if record_type not in {"job", "campaign"}:
+        raise ValueError("record_type must be job or campaign")
+    if status not in TRACKER_STATUSES:
+        raise ValueError("invalid tracker status")
+    table = "jobs" if record_type == "job" else "campaigns"
+    ts = now_iso()
+    with get_connection() as conn:
+        exists = conn.execute(f"SELECT id FROM {table} WHERE id=?", (record_id,)).fetchone()
+        if not exists:
+            raise LookupError("opportunity not found")
+        previous = conn.execute(
+            "SELECT applied_at, created_at FROM application_tracker WHERE record_type=? AND record_id=?",
+            (record_type, record_id),
+        ).fetchone()
+        applied_at = previous["applied_at"] if previous else None
+        if status in ACTIVE_APPLICATION_STATUSES and not applied_at:
+            applied_at = ts
+        created_at = previous["created_at"] if previous else ts
+        conn.execute(
+            """
+            INSERT INTO application_tracker(
+                record_type, record_id, status, is_favorite, note,
+                applied_at, next_action_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(record_type, record_id) DO UPDATE SET
+                status=excluded.status, is_favorite=excluded.is_favorite,
+                note=excluded.note, applied_at=excluded.applied_at,
+                next_action_at=excluded.next_action_at, updated_at=excluded.updated_at
+            """,
+            (
+                record_type,
+                record_id,
+                status,
+                int(is_favorite),
+                note.strip()[:2000],
+                applied_at,
+                next_action_at,
+                created_at,
+                ts,
+            ),
+        )
+        row = conn.execute(
+            """SELECT record_type, record_id, status, is_favorite, note,
+                applied_at, next_action_at, created_at, updated_at
+            FROM application_tracker WHERE record_type=? AND record_id=?""",
+            (record_type, record_id),
+        ).fetchone()
+        conn.commit()
+    result = row_to_dict(row)
+    result["is_favorite"] = bool(result.get("is_favorite"))
+    return result
+
+
+def remove_tracker(record_type: str, record_id: int) -> bool:
+    ensure_seed_data()
+    if record_type not in {"job", "campaign"}:
+        raise ValueError("record_type must be job or campaign")
+    with get_connection() as conn:
+        deleted = conn.execute(
+            "DELETE FROM application_tracker WHERE record_type=? AND record_id=?",
+            (record_type, record_id),
+        ).rowcount
+        conn.commit()
+    return bool(deleted)
 
 
 def list_signals(limit: int = 50) -> list[dict[str, Any]]:

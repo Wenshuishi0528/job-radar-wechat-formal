@@ -19,6 +19,21 @@ class MatchRequest(BaseModel):
     filters: dict = Field(default_factory=dict)
 
 
+class ResumeOpportunityMatchRequest(BaseModel):
+    resume_text: str = Field(min_length=20, max_length=100_000)
+    target_cities: list[str] = Field(default_factory=list)
+    preferred_job_families: list[str] = Field(default_factory=list)
+    degree: Optional[str] = None
+    filters: dict = Field(default_factory=dict)
+
+
+class TrackerRequest(BaseModel):
+    status: str = Field(default="saved", max_length=40)
+    is_favorite: bool = False
+    note: str = Field(default="", max_length=2_000)
+    next_action_at: Optional[str] = Field(default=None, max_length=40)
+
+
 class ImportTextRequest(BaseModel):
     company_name: str
     job_title: str = "待命名岗位"

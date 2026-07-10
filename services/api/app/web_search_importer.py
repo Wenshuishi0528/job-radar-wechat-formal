@@ -9,6 +9,7 @@ import time
 import base64
 import urllib.parse
 import urllib.request
+import urllib.error
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
@@ -16,9 +17,9 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 from .database import get_connection
-from .extraction import CITY_KEYWORDS, infer_job_family
+from .extraction import CITY_KEYWORDS, extract_cities, extract_deadline, infer_job_family
 from .repository import get_job, import_discovered_campaign, import_scraped_job
-from .source_registry import source_for_text, source_for_url, sources_for_keyword
+from .source_registry import SOURCES, source_for_text, source_for_url, sources_for_keyword
 from .wechat_articles import (
     MP_HOST,
     WECHAT_URL_RE,
@@ -123,11 +124,13 @@ ANTI_AUTOMATION_MARKERS = [
 RECRUITMENT_TITLE_TERMS = (
     "校园招聘", "校招", "秋招", "春招", "提前批", "招聘公告", "招聘启动", "招聘正式启动",
     "实习生招聘", "暑期实习", "高校毕业生招聘", "应届生招聘", "管培生招聘", "人才招聘",
+    "公开招聘", "招聘简章", "招聘岗位", "补录", "人才招募",
 )
 RECRUITMENT_PATH_TERMS = ("zhaopin", "career", "careers", "campus", "job", "recruit", "hotjob", "talent")
 REJECTED_ANNOUNCEMENT_TERMS = (
     "白皮书", "避坑指南", "招聘会", "双选会", "宣讲会", "就业启动大会", "圆满收官", "趋势", "如何", "面试技巧", "笔试真题",
-    "成绩查询", "录用名单", "拟录用", "考试通知", "笔试通知", "求职困境", "规则形同虚设", "应届生说", "内定",
+    "成绩查询", "录用名单", "拟录用", "拟聘", "公示", "资格审查", "体检名单", "考试通知", "笔试通知",
+    "规划清单", "职位汇总", "校招汇总", "求职攻略", "求职困境", "规则形同虚设", "应届生说", "内定",
 )
 
 
@@ -198,7 +201,20 @@ def fetch_curated_official_results(keyword: str, source_scope: str = "all", max_
         return []
     candidates: list[WebSearchCandidate] = []
     seen: set[str] = set()
-    for source in sources_for_keyword(keyword, limit=max_results):
+    matched_sources = sources_for_keyword(keyword, limit=max_results)
+    compact = _compact_keyword(keyword)
+    is_broad_recruiting_search = any(
+        term in compact for term in ["秋招", "校招", "校园招聘", "春招", "实习", "应届生招聘"]
+    )
+    if not matched_sources and is_broad_recruiting_search:
+        allowed_types = {"official_company", "government"}
+        if source_scope == "all":
+            allowed_types.add("job_board")
+        matched_sources = [
+            source for source in sorted(SOURCES, key=lambda item: item.priority, reverse=True)
+            if source.source_type in allowed_types
+        ][:max_results]
+    for source in matched_sources:
         item = _candidate_from_url(
             source.url,
             "official_catalog",
@@ -290,14 +306,30 @@ def build_google_news_rss_url(keyword: str, freshness_days: int = 45) -> str:
 
 def _google_news_query_variants(keyword: str) -> list[str]:
     compact = _compact_keyword(keyword)
-    if "秋招" in compact and not re.search(r"20\d{2}", keyword):
+    if compact in {"秋招", "校招", "校园招聘", "应届生招聘"} and not re.search(r"20\d{2}", keyword):
         year = _current_campus_year()
         return [
+            f'"{year}届" 招聘',
             f'"{year}届" 校园招聘',
             f'"{year}届" 秋招',
             f'"{year}届" 提前批',
-            f'"{year}届" 校招启动',
+            f'"{year}届" 实习生招聘',
+            f'"{year}届" 管培生招聘',
+            f'"{year}届" 央企 国企 招聘',
+            f'"{year}届" 银行 金融 招聘',
+            f'"{year}届" 互联网 人工智能 招聘',
+            f'"{year}届" 半导体 芯片 招聘',
+            f'"{year}届" 汽车 新能源 招聘',
+            f'"{year}届" 航空 航天 研究所 招聘',
+            f'"{year}届" 能源 电力 招聘',
+            f'"{year}届" 制造 快消 招聘',
         ]
+    if compact in {"实习", "暑期实习", "实习生"} and not re.search(r"20\d{2}", keyword):
+        year = _current_campus_year()
+        return [f'"{year}届" 实习', f'"{year}届" 暑期实习', "转正实习生招聘", "日常实习生招聘"]
+    if compact in {"国企", "央企", "国央企"} and not re.search(r"20\d{2}", keyword):
+        year = _current_campus_year()
+        return [f'"{year}届" 央企 招聘', f'"{year}届" 国企 招聘', "央企 校园招聘", "国企 高校毕业生招聘"]
     return [keyword]
 
 
@@ -453,9 +485,15 @@ def _candidate_from_url(url: str, provider: str, keyword: str, title: str = "", 
     if not canonical:
         canonical = _normalize_web_url(url)
         candidate_type = "web_signal"
-    if not canonical or _is_ignored_result_url(canonical):
+    parsed = urllib.parse.urlparse(canonical)
+    is_sogou_article_result = provider == "sogou" and parsed.netloc.lower() == "weixin.sogou.com" and parsed.path == "/link"
+    if is_sogou_article_result:
+        # New Sogou result pages expose an expiring redirect rather than the
+        # concrete mp.weixin.qq.com URL. The title and digest are still useful.
+        candidate_type = "news_announcement"
+    if not canonical or (_is_ignored_result_url(canonical) and not is_sogou_article_result):
         return None
-    if source_scope == "wechat" and candidate_type != "wechat_article":
+    if source_scope == "wechat" and candidate_type != "wechat_article" and not is_sogou_article_result:
         return None
     return WebSearchCandidate(
         url=url,
@@ -614,6 +652,10 @@ def _extract_chnenergy_station_jobs(html_text: str, source_url: str, default_com
                 if "专业" in part or "工程" in part or "计算机" in part:
                     majors_text = part
                     break
+        deadline = None
+        deadline_match = re.search(r"(20\d{2})[年\-/.](\d{1,2})[月\-/.](\d{1,2})", text)
+        if deadline_match:
+            deadline = f"{int(deadline_match.group(1)):04d}-{int(deadline_match.group(2)):02d}-{int(deadline_match.group(3)):02d}"
         job_url = urllib.parse.urljoin(source_url, html.unescape(link_match.group(2)))
         key = (company_name, title)
         if key in seen:
@@ -627,7 +669,7 @@ def _extract_chnenergy_station_jobs(html_text: str, source_url: str, default_com
             "title": title,
             "campaign_name": f"{default_company} 校园招聘" if default_company != "未知公司" else "自动搜索校园招聘",
             "recruitment_type": "校招",
-            "deadline": None,
+            "deadline": deadline,
             "degree_min": _degree_from_text(degree_text),
             "cities": _cities_from_text(city_text),
             "majors": [part for part in re.split(r"[,，、]", majors_text) if part],
@@ -754,43 +796,58 @@ def fetch_sogou_results(keyword: str, freshness_days: int = 45, max_results: int
         raise WebSearchImportError("Sogou discovery is disabled. Start in personal mode or set ENABLE_SOGOU_DISCOVERY=1.")
     results: list[WebSearchCandidate] = []
     seen: set[str] = set()
-    page = 1
-    while len(results) < max_results and page <= 3:
-        time.sleep(float(os.getenv("SOGOU_REQUEST_DELAY_SECONDS", "2.0")))
-        url = build_sogou_search_url(keyword, page=page, freshness_days=freshness_days)
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": os.getenv("JOB_RADAR_BROWSER_USER_AGENT", "Mozilla/5.0 JobRadar personal local search importer"),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            },
-        )
-        with _open_url(request, timeout=15) as response:
-            charset = response.headers.get_content_charset() or "utf-8"
-            body = response.read().decode(charset, errors="replace")
-        raw_candidates = parse_sogou_results(body, source_query=keyword)
-        for raw in raw_candidates:
-            age = None
-            if raw.publish_at:
-                try:
-                    age = max(0, (datetime.now() - datetime.strptime(raw.publish_at[:19], "%Y-%m-%d %H:%M:%S")).days)
-                except ValueError:
-                    age = None
-            item = _candidate_from_url(raw.url, "sogou", keyword, title=raw.title, snippet=raw.digest, source_scope="wechat" if source_scope == "wechat" else source_scope)
-            if not item:
-                continue
-            if age is not None and freshness_days > 0 and age > freshness_days:
-                item.status = "stale"
-                item.reject_reason = f"older_than_{freshness_days}_days"
-            if item.canonical_url not in seen:
-                seen.add(item.canonical_url)
-                results.append(item)
-                if len(results) >= max_results:
-                    break
-        if not raw_candidates:
-            break
-        page += 1
+    compact = _compact_keyword(keyword)
+    if compact in {"秋招", "校招", "校园招聘", "应届生招聘"} and not re.search(r"20\d{2}", keyword):
+        year = _current_campus_year()
+        queries = [f"{year}届 校园招聘", f"{year}届 秋招", f"{year}届 提前批"]
+    else:
+        queries = [keyword]
+    pages_per_query = 2 if len(queries) > 1 else 3
+    for query in queries:
+        for page in range(1, pages_per_query + 1):
+            if len(results) >= max_results:
+                break
+            time.sleep(float(os.getenv("SOGOU_REQUEST_DELAY_SECONDS", "2.0")))
+            url = build_sogou_search_url(query, page=page, freshness_days=freshness_days)
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": os.getenv("JOB_RADAR_BROWSER_USER_AGENT", "Mozilla/5.0 JobRadar personal local search importer"),
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                },
+            )
+            with _open_url(request, timeout=15) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                body = response.read().decode(charset, errors="replace")
+            raw_candidates = parse_sogou_results(body, source_query=keyword)
+            for raw in raw_candidates:
+                age = None
+                if raw.publish_at:
+                    try:
+                        age = max(0, (datetime.now() - datetime.strptime(raw.publish_at[:19], "%Y-%m-%d %H:%M:%S")).days)
+                    except ValueError:
+                        age = None
+                item = _candidate_from_url(raw.url, "sogou", keyword, title=raw.title, snippet=raw.digest, source_scope="wechat" if source_scope == "wechat" else source_scope)
+                if not item:
+                    continue
+                item.publisher = raw.account_name
+                item.published_at = raw.publish_at
+                title_years = [int(value) for value in re.findall(r"(20\d{2})\s*届", raw.title)]
+                is_historical = not re.search(r"20\d{2}", keyword) and title_years and max(title_years) < datetime.now().year
+                if is_historical:
+                    item.status = "stale"
+                    item.reject_reason = "historical_cohort"
+                elif age is not None and freshness_days > 0 and age > freshness_days:
+                    item.status = "stale"
+                    item.reject_reason = f"older_than_{freshness_days}_days"
+                if item.canonical_url not in seen:
+                    seen.add(item.canonical_url)
+                    results.append(item)
+                    if len(results) >= max_results:
+                        break
+            if not raw_candidates:
+                break
     return results[:max_results]
 
 
@@ -801,6 +858,7 @@ def fetch_search_results(provider: str, keyword: str, freshness_days: int = 45, 
         if source_scope not in {"all", "wechat"}:
             return []
         return fetch_sogou_results(keyword, freshness_days=freshness_days, max_results=max_results, source_scope=source_scope)
+    news_items: list[WebSearchCandidate] = []
     if provider == "google" and source_scope != "wechat":
         news_items = fetch_google_news_results(
             keyword,
@@ -808,10 +866,8 @@ def fetch_search_results(provider: str, keyword: str, freshness_days: int = 45, 
             max_results=max_results,
             source_scope=source_scope,
         )
-        if news_items:
-            return news_items
-    candidates: list[WebSearchCandidate] = []
-    seen: set[str] = set()
+    candidates: list[WebSearchCandidate] = list(news_items)
+    seen: set[str] = {item.canonical_url for item in candidates}
     start = 0
     while len(candidates) < max_results and start < 30:
         url = build_plain_search_url(provider, keyword, freshness_days=freshness_days, start=start, source_scope=source_scope)
@@ -823,12 +879,19 @@ def fetch_search_results(provider: str, keyword: str, freshness_days: int = 45, 
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             },
         )
-        with _open_url(request, timeout=15) as response:
-            final_url = response.geturl()
-            charset = response.headers.get_content_charset() or "utf-8"
-            body = response.read().decode(charset, errors="replace")
-        _detect_blocked_search(provider, body, final_url=final_url)
+        try:
+            with _open_url(request, timeout=15) as response:
+                final_url = response.geturl()
+                charset = response.headers.get_content_charset() or "utf-8"
+                body = response.read().decode(charset, errors="replace")
+            _detect_blocked_search(provider, body, final_url=final_url)
+        except (WebSearchImportError, urllib.error.URLError, TimeoutError, OSError):
+            if candidates:
+                break
+            raise
         page_candidates = parse_search_results(provider, body, keyword=keyword, source_scope=source_scope)
+        if provider == "bing":
+            page_candidates = [candidate for candidate in page_candidates if _is_relevant_candidate(candidate)]
         for candidate in page_candidates:
             if candidate.canonical_url not in seen:
                 seen.add(candidate.canonical_url)
@@ -839,6 +902,8 @@ def fetch_search_results(provider: str, keyword: str, freshness_days: int = 45, 
             break
         start += 10
         time.sleep(float(os.getenv("WEB_SEARCH_REQUEST_DELAY_SECONDS", "1.0")))
+    if provider == "bing" and not candidates:
+        raise WebSearchImportError("Bing returned no relevant recruiting results; its public search response may be degraded")
     return candidates[:max_results]
 
 
@@ -975,6 +1040,14 @@ def _is_relevant_candidate(candidate: WebSearchCandidate) -> bool:
     if any(term.lower() in text for term in REJECTED_ANNOUNCEMENT_TERMS):
         return False
     has_recruitment_term = any(term.lower() in text for term in RECRUITMENT_TITLE_TERMS)
+    if not has_recruitment_term and "招聘" in text:
+        publisher_host = urllib.parse.urlparse(candidate.publisher_url).netloc.lower()
+        has_recruitment_term = bool(
+            re.search(r"20\d{2}\s*(?:届|年)", text)
+            or source_for_text(text)
+            or publisher_host.endswith(".gov.cn")
+            or any(term in text for term in ["应届", "毕业生", "岗位", "报名", "招募"])
+        )
     if candidate.candidate_type == "news_announcement":
         return has_recruitment_term
     if not has_recruitment_term:
@@ -991,9 +1064,11 @@ def _infer_company_name(candidate: WebSearchCandidate) -> str:
     if source:
         return source.name
     title = re.sub(r"^[【\[].*?[】\]]\s*", "", candidate.title or "").strip()
+    title = re.sub(r"^(?:招聘)?\d+人[！!：:]\s*", "", title)
     title = re.sub(r"^@?20\d{2}届毕业生[:：]\s*", "", title)
+    title = re.sub(r"^20\d{2}年(?:度)?", "", title)
     prefix = re.split(r"20\d{2}(?:\s*(?:届|年|年度))?|校园招聘|校招|秋招|春招|招聘", title, maxsplit=1)[0]
-    prefix = re.sub(r"(?:正式)?启动[！!：:]?$|开始啦[！!]?$|顶尖人才计划.*$", "", prefix).strip(" ：:·-|_")
+    prefix = re.sub(r"(?:统一)?公开$|(?:正式)?启动[！!：:]?$|开始啦[！!]?$|顶尖人才计划.*$", "", prefix).strip(" ：:·-|_")
     if 2 <= len(prefix) <= 36 and prefix not in {"中国", "全国", "多家", "高校", "企业", "央企", "国企", "日本", "美国"}:
         return prefix
     return ""
@@ -1008,7 +1083,61 @@ def _infer_recruitment_type(text: str) -> str:
         return "春招"
     if "秋招" in text or "秋季" in text:
         return "秋招"
+    if "补录" in text:
+        return "补录"
+    if "公开招聘" in text or "事业单位" in text:
+        return "公开招聘"
     return "校招"
+
+
+def _infer_unknown_company_metadata(text: str, publisher_url: str) -> tuple[str, str]:
+    host = urllib.parse.urlparse(publisher_url).netloc.lower()
+    if "事业单位" in text or any(term in text for term in ["大学", "学院", "学校", "研究所", "研究院"]):
+        company_type = "事业单位"
+    elif "央企" in text:
+        company_type = "央企"
+    elif "国企" in text or "国资" in text:
+        company_type = "国企"
+    elif host.endswith(".gov.cn"):
+        company_type = "政府/事业单位"
+    else:
+        company_type = "unknown"
+
+    industry_rules = (
+        ("金融", ["银行", "证券", "基金", "保险", "金融"]),
+        ("半导体", ["半导体", "芯片", "集成电路", "存储"]),
+        ("汽车", ["汽车", "车企", "智能驾驶", "新能源车"]),
+        ("航空航天", ["航空", "航天", "航发", "飞行器"]),
+        ("能源电力", ["能源", "电力", "电网", "石油", "煤炭", "光伏", "风电"]),
+        ("互联网/人工智能", ["互联网", "人工智能", "AI", "大模型", "软件", "科技"]),
+        ("通信", ["通信", "电信", "运营商"]),
+        ("教育科研", ["大学", "学院", "学校", "教师", "研究所", "研究院"]),
+        ("先进制造", ["制造", "机械", "装备", "材料", "化工"]),
+    )
+    industry = next((name for name, terms in industry_rules if any(term in text for term in terms)), "unknown")
+    return company_type, industry
+
+
+def _optional_degree(text: str) -> str:
+    if "博士" in text:
+        return "phd"
+    if "硕士" in text or "研究生" in text:
+        return "master"
+    if "本科" in text:
+        return "bachelor"
+    if "大专" in text or "专科" in text:
+        return "associate"
+    return "unknown"
+
+
+def _extract_major_terms(text: str) -> list[str]:
+    terms = (
+        "计算机", "软件工程", "人工智能", "电子信息", "通信工程", "自动化", "控制科学",
+        "电气工程", "机械工程", "材料科学", "化学工程", "能源动力", "航空航天",
+        "数学", "统计学", "物理学", "金融学", "经济学", "会计学", "财务管理",
+        "法学", "人力资源", "市场营销", "新闻传播", "外国语言文学",
+    )
+    return [term for term in terms if term in text]
 
 
 def _campaign_payload_from_candidate(candidate: WebSearchCandidate) -> dict[str, Any] | None:
@@ -1024,11 +1153,15 @@ def _campaign_payload_from_candidate(candidate: WebSearchCandidate) -> dict[str,
     source_level = evidence_source.trust_level if evidence_source else ("S" if source_host.endswith(".gov.cn") or "sasac.gov.cn" in source_host else "B")
     status = "pending_review" if candidate.provider == "official_catalog" else "open"
     evidence = " ｜ ".join(part for part in [candidate.title, candidate.publisher, candidate.snippet] if part)
+    context = " ".join(part for part in [candidate.title, candidate.snippet, candidate.publisher] if part)
+    inferred_type, inferred_industry = _infer_unknown_company_metadata(context, candidate.publisher_url)
+    deadline = extract_deadline(context)
+    job_family = infer_job_family(candidate.title, context)
     return {
         "company_name": company_name,
         "company_aliases": list(source.aliases) if source else [],
-        "company_type": source.company_type if source else "unknown",
-        "industry": source.industry if source else "unknown",
+        "company_type": source.company_type if source else inferred_type,
+        "industry": source.industry if source else inferred_industry,
         "company_source_level": source.trust_level if source else source_level,
         "official_site": source.url if source else candidate.publisher_url or None,
         "recruit_site": source.url if source else None,
@@ -1037,11 +1170,15 @@ def _campaign_payload_from_candidate(candidate: WebSearchCandidate) -> dict[str,
         "target_cohort": f"{cohort_matches[-1]}届" if cohort_matches else None,
         "status": status,
         "start_date": candidate.published_at[:10] if candidate.published_at else None,
-        "deadline": None,
-        "degree_min": "bachelor",
+        "deadline": deadline.value if deadline else None,
+        "degree_min": _optional_degree(context),
+        "cities": extract_cities(context),
+        "job_families": [job_family] if job_family != "unknown" else [],
+        "majors": _extract_major_terms(context),
         "apply_url": source.url if source else None,
         "source_url": candidate.canonical_url,
         "source_level": source_level,
+        "source_published_at": candidate.published_at,
         "description": candidate.snippet or f"{candidate.publisher} 发布的招聘公告。",
         "evidence_text": evidence,
         "confidence": 0.86 if source else 0.74,
@@ -1103,7 +1240,8 @@ def _should_fetch_jobs(candidate: WebSearchCandidate) -> bool:
     parsed = urllib.parse.urlparse(candidate.canonical_url)
     host_path = f"{parsed.netloc}{parsed.path}".lower()
     if candidate.provider == "official_catalog":
-        return True
+        source = source_for_url(candidate.canonical_url)
+        return bool(source and source.parser_type != "generic")
     return any(token in host_path for token in ["zhaopin", "career", "careers", "campus", "job", "recruit", "hotjob"])
 
 

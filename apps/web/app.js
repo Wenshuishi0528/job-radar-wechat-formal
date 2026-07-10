@@ -3,8 +3,20 @@ const $ = (id) => document.getElementById(id);
 const state = {
   loading: false,
   opportunities: [],
+  clientItems: [],
+  clientMode: false,
+  currentView: 'opportunities',
+  currentTrackerItem: null,
+  page: 0,
+  pageSize: 50,
+  total: 0,
   sortKey: 'updated_at',
   sortDirection: 'desc',
+};
+
+const TRACKER_LABELS = {
+  saved: '已收藏', preparing: '准备中', applied: '已投递', assessment: '测评 / 笔试',
+  interview: '面试', offer: 'Offer', rejected: '未通过', withdrawn: '已放弃',
 };
 
 function escapeHtml(value) {
@@ -38,6 +50,13 @@ function statusClass(value) {
   return 'warn';
 }
 
+function trackerClass(value) {
+  if (value === 'offer') return 'good';
+  if (value === 'rejected' || value === 'withdrawn') return 'bad';
+  if (value === 'applied' || value === 'assessment' || value === 'interview') return 'progress';
+  return 'neutral';
+}
+
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
@@ -45,7 +64,7 @@ async function fetchJson(url, options) {
   return data;
 }
 
-function searchParams() {
+function searchParams({ all = false, trackedOnly = null } = {}) {
   const params = new URLSearchParams();
   const values = {
     query: $('query').value.trim(),
@@ -54,13 +73,20 @@ function searchParams() {
     recruitment_type: $('recruitmentType').value,
     company_type: $('companyType').value,
     industry: $('industry').value,
+    job_family: $('jobFamily').value,
+    major: $('major').value.trim(),
     source_level: $('sourceLevel').value,
+    tracker_status: $('trackerStatus').value,
+    freshness_days: $('freshnessDays').value,
   };
   Object.entries(values).forEach(([key, value]) => {
     if (value) params.set(key, value);
   });
   params.set('include_expired', String($('includeExpired').checked));
-  params.set('limit', '500');
+  const onlyTracked = trackedOnly === null ? state.currentView === 'tracker' : trackedOnly;
+  if (onlyTracked) params.set('tracked_only', 'true');
+  params.set('offset', all ? '0' : String(state.page * state.pageSize));
+  params.set('limit', all ? '500' : String(state.pageSize));
   return params;
 }
 
@@ -96,8 +122,10 @@ function renderOpportunityRow(item) {
   const sourceLevel = String(item.source_level || 'C').toLowerCase();
   const sourceName = item.source_domain || '来源待确认';
   const status = `<span class="tag ${statusClass(item.status)}">${statusLabel(item.status)}</span>`;
+  const matchClass = item.match?.status === 'high' || item.match?.status === 'eligible'
+    ? 'good' : item.match?.status === 'low' || item.match?.status === 'not_eligible' ? 'bad' : 'warn';
   const matchTag = item.match
-    ? `<span class="tag ${item.match.status === 'eligible' ? 'good' : item.match.status === 'not_eligible' ? 'bad' : 'warn'}">匹配 ${Math.round((item.match.score || 0) * 100)}%</span>` : '';
+    ? `<span class="tag ${matchClass}">匹配 ${Math.round((item.match.score || 0) * 100)}%</span>` : '';
   const applyUrl = item.apply_url || '';
   const sourceUrl = item.source_url || '';
   const applyAction = applyUrl
@@ -107,21 +135,30 @@ function renderOpportunityRow(item) {
   const detailAction = item.job_id
     ? `<button type="button" data-job-id="${Number(item.job_id)}">证据</button>` : '';
   const batch = [item.target_cohort || '届别未注明', item.recruitment_type || '类型未注明'].join(' · ');
-  return `<tr>
+  const directionTags = (item.job_families || []).slice(0, 2).map((value) => `<span class="tag">${escapeHtml(value)}</span>`).join('');
+  const majorLine = (item.majors || []).length
+    ? `<span class="cell-sub">专业：${escapeHtml(item.majors.slice(0, 4).join('、'))}</span>` : '';
+  const trackerLabel = TRACKER_LABELS[item.tracker_status] || (item.is_favorite ? '已收藏' : '记录');
+  const trackerButton = `<button type="button" class="tracker-button ${trackerClass(item.tracker_status)}" data-tracker-id="${escapeHtml(item.id)}">${escapeHtml(trackerLabel)}</button>`;
+  return `<tr data-opportunity-id="${escapeHtml(item.id)}">
     <td data-label="更新"><span class="cell-main">${escapeHtml(formatDate(item.updated_at))}</span><span class="cell-sub">${status}</span></td>
     <td data-label="公司"><span class="cell-main">${escapeHtml(item.company_name)}</span><span class="cell-sub">${escapeHtml(companyMeta)}</span></td>
-    <td data-label="岗位 / 项目"><div class="title-line"><span class="cell-main">${escapeHtml(item.title)}</span><span class="tag">${recordLabel}</span>${matchTag}</div>${campaignLine}<span class="cell-sub">${escapeHtml(degreeLabel(item.degree_min))}</span></td>
+    <td data-label="岗位 / 项目"><div class="title-line"><span class="cell-main">${escapeHtml(item.title)}</span><span class="tag">${recordLabel}</span>${directionTags}${matchTag}</div>${campaignLine}<span class="cell-sub">${escapeHtml(degreeLabel(item.degree_min))}</span>${majorLine}</td>
     <td data-label="批次"><span class="cell-main">${escapeHtml(batch)}</span></td>
     <td data-label="地点"><span class="cell-main">${escapeHtml(cities)}</span></td>
     <td data-label="截止"><span class="cell-main ${item.status === 'closed' ? 'deadline-passed' : ''}">${escapeHtml(deadline)}</span></td>
     <td data-label="来源"><span class="tag source-${sourceLevel}">来源 ${escapeHtml(item.source_level || 'C')}</span><span class="cell-sub">${escapeHtml(sourceName)}</span></td>
+    <td data-label="进展">${trackerButton}${item.next_action_at ? `<span class="cell-sub">下一步 ${escapeHtml(formatDate(item.next_action_at))}</span>` : ''}</td>
     <td data-label="操作"><div class="row-actions">${applyAction}${sourceAction}${detailAction}</div></td>
   </tr>`;
 }
 
-function bindDetailButtons() {
+function bindRowButtons() {
   document.querySelectorAll('[data-job-id]').forEach((button) => {
     button.addEventListener('click', () => showDetail(Number(button.dataset.jobId)));
+  });
+  document.querySelectorAll('[data-tracker-id]').forEach((button) => {
+    button.addEventListener('click', () => openTracker(button.dataset.trackerId));
   });
 }
 
@@ -131,6 +168,10 @@ function sortedOpportunities(items) {
   return [...items].sort((left, right) => {
     let a = left[state.sortKey] ?? '';
     let b = right[state.sortKey] ?? '';
+    if (state.sortKey === 'match_score') {
+      a = left.match?.score || 0;
+      b = right.match?.score || 0;
+    }
     if (state.sortKey === 'source_level') {
       a = sourceRanks[a] || 0;
       b = sourceRanks[b] || 0;
@@ -146,20 +187,49 @@ function updateSortHeaders() {
   });
 }
 
-function renderOpportunities(items) {
-  state.opportunities = items;
+function paintOpportunities(items) {
   const sorted = sortedOpportunities(items);
   $('opportunityRows').innerHTML = sorted.map(renderOpportunityRow).join('');
   $('emptyOpportunities').hidden = items.length > 0;
   document.querySelector('.opportunity-table')?.classList.toggle('empty', items.length === 0);
   updateSortHeaders();
-  bindDetailButtons();
+  bindRowButtons();
+}
+
+function updatePager() {
+  const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+  const visiblePage = Math.min(state.page + 1, pages);
+  $('pagerSummary').textContent = `第 ${visiblePage} / ${pages} 页 · 共 ${state.total} 条`;
+  $('previousPage').disabled = state.page <= 0;
+  $('nextPage').disabled = state.page + 1 >= pages;
+}
+
+function renderOpportunities(items) {
+  state.opportunities = items;
+  paintOpportunities(items);
+  updatePager();
+}
+
+function renderClientPage() {
+  const sorted = sortedOpportunities(state.clientItems);
+  const start = state.page * state.pageSize;
+  state.opportunities = sorted.slice(start, start + state.pageSize);
+  paintOpportunities(state.opportunities);
+  updatePager();
 }
 
 async function loadOpportunities() {
+  if (state.sortKey === 'match_score') {
+    state.sortKey = 'updated_at';
+    state.sortDirection = 'desc';
+  }
+  state.clientMode = false;
+  state.clientItems = [];
   const data = await fetchJson(`/api/opportunities?${searchParams().toString()}`);
+  state.total = data.count || 0;
   renderOpportunities(data.items || []);
-  $('resultSummary').textContent = `共 ${data.count || 0} 条 · ${data.job_count || 0} 个具体岗位 · ${data.campaign_count || 0} 个招聘项目`;
+  const viewLabel = state.currentView === 'tracker' ? '已记录机会' : '机会';
+  $('resultSummary').textContent = `共 ${data.count || 0} 条${viewLabel} · ${data.job_count || 0} 个具体岗位 · ${data.campaign_count || 0} 个招聘项目`;
   return data;
 }
 
@@ -170,7 +240,7 @@ async function runSearch({ refresh = true } = {}) {
   try {
     setSearchStatus('正在读取本地机会库...');
     localData = await loadOpportunities();
-    switchView('opportunities');
+    switchView('opportunities', { load: false });
   } catch (error) {
     setSearchStatus(error.message, 'error');
     setLoading(false);
@@ -213,6 +283,10 @@ function profile() {
   };
 }
 
+function splitValues(value) {
+  return String(value || '').split(/[,，、\n]/).map((item) => item.trim()).filter(Boolean);
+}
+
 function matchedOpportunity(item) {
   const job = item.job;
   return {
@@ -229,6 +303,8 @@ function matchedOpportunity(item) {
     recruitment_type: job.campaign?.recruitment_type,
     target_cohort: job.campaign?.target_cohort,
     cities: job.cities || [],
+    job_families: job.job_family && job.job_family !== 'unknown' ? [job.job_family] : [],
+    majors: job.majors || [],
     degree_min: job.degree_min,
     deadline: job.campaign?.deadline,
     status: job.status,
@@ -238,6 +314,10 @@ function matchedOpportunity(item) {
     source_level: job.source_level,
     quality_score: job.quality_score,
     risk_level: job.risk_level,
+    tracker_status: null,
+    is_favorite: false,
+    tracker_note: '',
+    next_action_at: null,
     match: item.match,
   };
 }
@@ -254,12 +334,73 @@ async function runMatch() {
       body: JSON.stringify({ profile: profile(), filters }),
     });
     const items = (data.items || []).map(matchedOpportunity);
-    renderOpportunities(items);
+    state.clientMode = true;
+    state.clientItems = items;
+    state.total = items.length;
+    state.page = 0;
+    state.sortKey = 'match_score';
+    state.sortDirection = 'desc';
+    renderClientPage();
     $('resultSummary').textContent = `共 ${items.length} 个具体岗位，已按画像判断`;
     setSearchStatus(`画像匹配完成：${items.length} 个具体岗位`, 'success');
-    switchView('opportunities');
+    switchView('opportunities', { load: false });
   } catch (error) {
     setSearchStatus(error.message, 'error');
+  }
+}
+
+async function runResumeMatch() {
+  const resumeText = $('resumeText').value.trim();
+  if (resumeText.length < 20) {
+    setSearchStatus('请先粘贴简历内容，或选择 TXT / Markdown 简历文件。', 'error');
+    return;
+  }
+  setLoading(true);
+  setSearchStatus('正在本机分析简历并匹配机会...');
+  try {
+    const filters = Object.fromEntries(searchParams({ all: true, trackedOnly: false }).entries());
+    delete filters.offset;
+    delete filters.limit;
+    delete filters.tracked_only;
+    const data = await fetchJson('/api/opportunities/match', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        resume_text: resumeText,
+        target_cities: splitValues($('targetCities').value),
+        preferred_job_families: splitValues($('targetJobFamilies').value),
+        degree: $('degree').value,
+        filters,
+      }),
+    });
+    state.currentView = 'opportunities';
+    state.clientMode = true;
+    state.clientItems = data.items || [];
+    state.total = state.clientItems.length;
+    state.page = 0;
+    state.sortKey = 'match_score';
+    state.sortDirection = 'desc';
+    renderClientPage();
+    switchView('opportunities', { load: false });
+    $('resultSummary').textContent = `共 ${state.total} 条机会，已按本地简历匹配度排序`;
+    setSearchStatus(`简历匹配完成：${state.total} 条机会`, 'success');
+  } catch (error) {
+    setSearchStatus(error.message, 'error');
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function readResumeFile() {
+  const file = $('resumeFile').files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    if (!text.trim()) throw new Error('文件中没有可读取的文本。');
+    $('resumeText').value = text.slice(0, 100000);
+    setSearchStatus(`已读取简历文件：${file.name}`, 'success');
+  } catch (error) {
+    setSearchStatus(`简历文件读取失败：${error.message}`, 'error');
   }
 }
 
@@ -276,6 +417,81 @@ async function showDetail(jobId) {
     $('detailDialog').showModal();
   } catch (error) {
     setSearchStatus(error.message, 'error');
+  }
+}
+
+function findOpportunity(id) {
+  return state.clientItems.find((item) => item.id === id)
+    || state.opportunities.find((item) => item.id === id);
+}
+
+function openTracker(id) {
+  const item = findOpportunity(id);
+  if (!item) return;
+  state.currentTrackerItem = item;
+  $('trackerDialogTitle').textContent = `${item.company_name} · ${item.title}`;
+  $('trackerDialogStatus').value = item.tracker_status || 'saved';
+  $('trackerFavorite').checked = Boolean(item.is_favorite || item.tracker_status === 'saved');
+  $('trackerNextAction').value = formatDate(item.next_action_at, '');
+  $('trackerNote').value = item.tracker_note || '';
+  $('deleteTracker').hidden = !item.tracker_status && !item.is_favorite;
+  $('trackerDialogStatusText').textContent = '';
+  $('trackerDialog').showModal();
+}
+
+function applyTrackerResult(item, result) {
+  item.tracker_status = result.status;
+  item.is_favorite = Boolean(result.is_favorite);
+  item.tracker_note = result.note || '';
+  item.applied_at = result.applied_at || null;
+  item.next_action_at = result.next_action_at || null;
+  item.tracker_updated_at = result.updated_at || null;
+}
+
+async function saveTracking(event) {
+  event.preventDefault();
+  const item = state.currentTrackerItem;
+  if (!item) return;
+  $('trackerDialogStatusText').textContent = '正在保存...';
+  const recordId = item.record_type === 'job' ? item.job_id : item.campaign_id;
+  try {
+    const result = await fetchJson(`/api/tracker/${encodeURIComponent(item.record_type)}/${Number(recordId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: $('trackerDialogStatus').value,
+        is_favorite: $('trackerFavorite').checked,
+        note: $('trackerNote').value,
+        next_action_at: $('trackerNextAction').value || null,
+      }),
+    });
+    applyTrackerResult(item, result);
+    $('trackerDialog').close();
+    if (state.clientMode) renderClientPage();
+    else await loadOpportunities();
+    setSearchStatus('投递进展已保存。', 'success');
+  } catch (error) {
+    $('trackerDialogStatusText').textContent = error.message;
+  }
+}
+
+async function deleteTracking() {
+  const item = state.currentTrackerItem;
+  if (!item) return;
+  const recordId = item.record_type === 'job' ? item.job_id : item.campaign_id;
+  try {
+    await fetchJson(`/api/tracker/${encodeURIComponent(item.record_type)}/${Number(recordId)}`, { method: 'DELETE' });
+    item.tracker_status = null;
+    item.is_favorite = false;
+    item.tracker_note = '';
+    item.applied_at = null;
+    item.next_action_at = null;
+    $('trackerDialog').close();
+    if (state.clientMode) renderClientPage();
+    else await loadOpportunities();
+    setSearchStatus('投递记录已删除。', 'success');
+  } catch (error) {
+    $('trackerDialogStatusText').textContent = error.message;
   }
 }
 
@@ -334,18 +550,25 @@ async function loadArticles() {
   }
 }
 
-function switchView(name) {
+function switchView(name, { load = true } = {}) {
+  state.currentView = name;
   document.querySelectorAll('.view-tab').forEach((button) => {
     const active = button.dataset.view === name;
     button.classList.toggle('active', active);
     button.setAttribute('aria-selected', String(active));
   });
-  const opportunitiesActive = name === 'opportunities';
-  $('opportunitiesView').classList.toggle('active', opportunitiesActive);
-  $('opportunitiesView').hidden = !opportunitiesActive;
-  $('articlesView').classList.toggle('active', !opportunitiesActive);
-  $('articlesView').hidden = opportunitiesActive;
-  if (!opportunitiesActive) loadArticles();
+  const articlesActive = name === 'articles';
+  $('opportunitiesView').classList.toggle('active', !articlesActive);
+  $('opportunitiesView').hidden = articlesActive;
+  $('articlesView').classList.toggle('active', articlesActive);
+  $('articlesView').hidden = !articlesActive;
+  if (articlesActive) {
+    loadArticles();
+  } else if (load) {
+    state.clientMode = false;
+    state.page = 0;
+    loadOpportunities().catch((error) => setSearchStatus(error.message, 'error'));
+  }
 }
 
 function clearPresetState() {
@@ -359,13 +582,19 @@ function resetFilters() {
   $('recruitmentType').value = '';
   $('companyType').value = '';
   $('industry').value = '';
+  $('jobFamily').value = '';
+  $('major').value = '';
   $('sourceLevel').value = 'B';
+  $('trackerStatus').value = '';
   $('includeExpired').checked = false;
+  state.page = 0;
+  state.clientMode = false;
   clearPresetState();
 }
 
 async function applyPreset(name, button) {
   resetFilters();
+  state.currentView = 'opportunities';
   button.classList.add('active');
   const campusYear = new Date().getMonth() + 1 >= 6 ? new Date().getFullYear() + 1 : new Date().getFullYear();
   if (name === 'latest') {
@@ -404,6 +633,54 @@ async function openExternalSearch(provider) {
   }
 }
 
+function csvCell(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+async function exportCsv() {
+  try {
+    const items = state.clientMode
+      ? state.clientItems
+      : (await fetchJson(`/api/opportunities?${searchParams({ all: true }).toString()}`)).items || [];
+    const headers = ['更新', '公司', '企业类型', '行业', '岗位/项目', '岗位方向', '专业', '批次', '届别', '地点', '截止', '来源等级', '投递状态', '投递时间', '下一步日期', '备注', '投递链接', '公告链接'];
+    const rows = items.map((item) => [
+      formatDate(item.updated_at, ''), item.company_name, item.company_type, item.industry,
+      item.title, (item.job_families || []).join('、'), (item.majors || []).join('、'),
+      item.recruitment_type, item.target_cohort, (item.cities || []).join('、'),
+      item.deadline, item.source_level, TRACKER_LABELS[item.tracker_status] || '',
+      formatDate(item.applied_at, ''), formatDate(item.next_action_at, ''), item.tracker_note,
+      item.apply_url, item.source_url,
+    ]);
+    const csv = [headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\n');
+    const blob = new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `job-radar-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setSearchStatus(`已导出 ${items.length} 条记录。`, 'success');
+  } catch (error) {
+    setSearchStatus(`导出失败：${error.message}`, 'error');
+  }
+}
+
+async function changePage(delta) {
+  const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
+  const next = Math.max(0, Math.min(pages - 1, state.page + delta));
+  if (next === state.page) return;
+  state.page = next;
+  if (state.clientMode) renderClientPage();
+  else await loadOpportunities();
+}
+
+async function changePageSize() {
+  state.pageSize = Number($('pageSize').value || 50);
+  state.page = 0;
+  if (state.clientMode) renderClientPage();
+  else await loadOpportunities();
+}
+
 async function loadStatus() {
   try {
     const [config, registry] = await Promise.all([
@@ -431,6 +708,17 @@ function setLeftWidth(width) {
   workspace.style.setProperty('--left-width', `${Math.round(next)}px`);
   $('splitter').setAttribute('aria-valuenow', String(Math.round(next)));
   localStorage.setItem('jobRadarLeftWidth', `${Math.round(next)}px`);
+}
+
+function initResponsiveFilters() {
+  const details = $('advancedFilters');
+  const mobile = window.matchMedia('(max-width: 720px)');
+  const sync = (event) => {
+    if (event.matches) details.removeAttribute('open');
+    else details.setAttribute('open', '');
+  };
+  sync(mobile);
+  mobile.addEventListener('change', sync);
 }
 
 function initSplitter() {
@@ -466,16 +754,29 @@ function bindEvents() {
   $('searchForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     clearPresetState();
+    state.currentView = 'opportunities';
+    state.clientMode = false;
+    state.page = 0;
     await runSearch({ refresh: true });
   });
   $('resetFilters').addEventListener('click', async () => {
     resetFilters();
+    state.currentView = 'opportunities';
     await runSearch({ refresh: false });
   });
+  $('runResumeMatch').addEventListener('click', runResumeMatch);
   $('runMatch').addEventListener('click', runMatch);
+  $('resumeFile').addEventListener('change', readResumeFile);
   $('importButton').addEventListener('click', importText);
   $('closeDialog').addEventListener('click', () => $('detailDialog').close());
+  $('closeTrackerDialog').addEventListener('click', () => $('trackerDialog').close());
+  $('trackerForm').addEventListener('submit', saveTracking);
+  $('deleteTracker').addEventListener('click', deleteTracking);
   $('searchArticles').addEventListener('click', loadArticles);
+  $('exportCsv').addEventListener('click', exportCsv);
+  $('previousPage').addEventListener('click', () => changePage(-1));
+  $('nextPage').addEventListener('click', () => changePage(1));
+  $('pageSize').addEventListener('change', changePageSize);
   $('openGoogle').addEventListener('click', () => openExternalSearch('google'));
   $('openBing').addEventListener('click', () => openExternalSearch('bing'));
   $('openSogou').addEventListener('click', () => openExternalSearch('sogou'));
@@ -488,13 +789,16 @@ function bindEvents() {
       state.sortKey = key;
       state.sortDirection = key === 'updated_at' || key === 'deadline' || key === 'source_level' ? 'desc' : 'asc';
     }
-    renderOpportunities(state.opportunities);
+    if (state.clientMode) renderClientPage();
+    else renderOpportunities(state.opportunities);
   }));
 }
 
 async function init() {
   const campusYear = new Date().getMonth() + 1 >= 6 ? new Date().getFullYear() + 1 : new Date().getFullYear();
   $('autumnPreset').textContent = `${String(campusYear).slice(-2)}届热门秋招`;
+  state.pageSize = Number($('pageSize').value || 50);
+  initResponsiveFilters();
   initSplitter();
   bindEvents();
   loadStatus();

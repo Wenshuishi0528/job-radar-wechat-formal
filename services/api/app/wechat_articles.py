@@ -527,6 +527,12 @@ class SogouResultParser(HTMLParser):
         self.text_parts: list[str] = []
         self.current_link = ""
         self.current_image = ""
+        self.title_parts: list[str] = []
+        self.digest_parts: list[str] = []
+        self.account_parts: list[str] = []
+        self.in_title = False
+        self.in_digest = False
+        self.in_account = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr = {k: v or "" for k, v in attrs}
@@ -536,12 +542,25 @@ class SogouResultParser(HTMLParser):
             self.text_parts = []
             self.current_link = ""
             self.current_image = ""
+            self.title_parts = []
+            self.digest_parts = []
+            self.account_parts = []
         if not self.in_item:
             return
         self.tag_stack.append(tag)
         href = attr.get("href") or ""
-        if tag == "a" and href and not self.current_link:
+        element_id = attr.get("id", "")
+        element_class = attr.get("class", "")
+        is_title_link = tag == "a" and ("_title_" in element_id or "h3" in self.tag_stack)
+        if tag == "a" and href and is_title_link:
             self.current_link = urllib.parse.urljoin("https://weixin.sogou.com", href)
+            self.in_title = True
+        elif tag == "a" and href and not self.current_link and "_img_" not in element_id:
+            self.current_link = urllib.parse.urljoin("https://weixin.sogou.com", href)
+        if tag == "p" and "txt-info" in element_class:
+            self.in_digest = True
+        if tag == "span" and "all-time-y2" in element_class:
+            self.in_account = True
         if tag == "img" and not self.current_image:
             self.current_image = attr.get("src") or attr.get("data-src") or ""
             if self.current_image.startswith("//"):
@@ -554,14 +573,36 @@ class SogouResultParser(HTMLParser):
         if self.in_item and tag == "li":
             text = normalize_space(" ".join(self.text_parts))
             url = normalize_wechat_url(self.current.get("url") or self.current_link)
-            title = self.current.get("title") or text[:80]
-            digest = self.current.get("digest") or text[:240]
-            self.results.append(ArticleCandidate(url=url, title=title, digest=digest, cover_url=self.current_image, publish_at=self.current.get("publish_at"), provider="sogou_weixin_search", source_query=self.source_query))
+            title = normalize_space(" ".join(self.title_parts)) or self.current.get("title") or text[:80]
+            digest = normalize_space(" ".join(self.digest_parts)) or self.current.get("digest") or text[:240]
+            account_name = normalize_space(" ".join(self.account_parts))
+            self.results.append(ArticleCandidate(
+                url=url,
+                title=title,
+                account_name=account_name,
+                digest=digest,
+                cover_url=self.current_image,
+                publish_at=self.current.get("publish_at"),
+                provider="sogou_weixin_search",
+                source_query=self.source_query,
+            ))
             self.in_item = False
             self.current = {}
             self.text_parts = []
             self.current_link = ""
             self.current_image = ""
+            self.title_parts = []
+            self.digest_parts = []
+            self.account_parts = []
+            self.in_title = False
+            self.in_digest = False
+            self.in_account = False
+        elif self.in_item and tag == "a" and self.in_title:
+            self.in_title = False
+        elif self.in_item and tag == "p" and self.in_digest:
+            self.in_digest = False
+        elif self.in_item and tag == "span" and self.in_account:
+            self.in_account = False
         if self.in_item and self.tag_stack:
             self.tag_stack.pop()
 
@@ -572,8 +613,15 @@ class SogouResultParser(HTMLParser):
         if not value:
             return
         self.text_parts.append(value)
-        if not self.current.get("title") and "h3" in self.tag_stack:
-            self.current["title"] = value
+        if self.in_title:
+            self.title_parts.append(value)
+        if self.in_digest:
+            self.digest_parts.append(value)
+        if self.in_account:
+            self.account_parts.append(value)
+        timestamp = re.search(r"timeConvert\(['\"]?(\d{10,13})", value)
+        if timestamp:
+            self.current["publish_at"] = parse_datetime(timestamp.group(1))
 
 
 def parse_sogou_results(html_text: str, source_query: str = "") -> list[ArticleCandidate]:

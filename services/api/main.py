@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .app.extraction import extract_notice
 from .app.matchers import match_job
+from .app.opportunity_matcher import match_opportunity
 from .app.repository import (
     ensure_seed_data,
     get_job,
@@ -20,11 +21,16 @@ from .app.repository import (
     list_opportunities,
     list_signals,
     refresh_expired_statuses,
+    refresh_job_families,
     remove_demo_data,
+    remove_tracker,
+    save_tracker,
 )
 from .app.schemas import (
     ImportTextRequest,
     MatchRequest,
+    ResumeOpportunityMatchRequest,
+    TrackerRequest,
     WechatAutoSearchImportRequest,
     WechatDiscoverRequest,
     WechatIngestHtmlRequest,
@@ -46,7 +52,7 @@ from .app.wechat_articles import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WEB_DIR = PROJECT_ROOT / "apps" / "web"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 
 app = FastAPI(title="Job Radar 校招雷达", version=APP_VERSION)
 app.add_middleware(
@@ -62,6 +68,7 @@ app.add_middleware(
 def startup() -> None:
     ensure_seed_data()
     remove_demo_data()
+    refresh_job_families()
     refresh_expired_statuses()
 
 
@@ -105,7 +112,11 @@ def api_opportunities(
     recruitment_type: Optional[str] = None,
     company_type: Optional[str] = None,
     industry: Optional[str] = None,
+    job_family: Optional[str] = None,
+    major: Optional[str] = None,
     source_level: Optional[str] = Query(default=None, pattern="^[SABCD]?$"),
+    tracker_status: Optional[str] = None,
+    tracked_only: bool = False,
     freshness_days: int = Query(default=0, ge=0, le=3650),
     include_expired: bool = False,
     offset: int = Query(default=0, ge=0),
@@ -118,12 +129,61 @@ def api_opportunities(
         "recruitment_type": recruitment_type,
         "company_type": company_type,
         "industry": industry,
+        "job_family": job_family,
+        "major": major,
         "source_level": source_level,
+        "tracker_status": tracker_status,
+        "tracked_only": tracked_only,
         "freshness_days": freshness_days,
         "include_expired": include_expired,
         "offset": offset,
         "limit": limit,
     })
+
+
+@app.post("/api/opportunities/match")
+def api_match_opportunities(request: ResumeOpportunityMatchRequest) -> dict:
+    filters = {**(request.filters or {}), "offset": 0, "limit": 500}
+    data = list_opportunities(filters)
+    items = []
+    for opportunity in data["items"]:
+        items.append({
+            **opportunity,
+            "match": match_opportunity(
+                request.resume_text,
+                opportunity,
+                target_cities=request.target_cities,
+                preferred_job_families=request.preferred_job_families,
+                degree=request.degree,
+            ),
+        })
+    items.sort(key=lambda item: (item["match"]["score"], item.get("updated_at") or ""), reverse=True)
+    return {"items": items, "count": len(items)}
+
+
+@app.put("/api/tracker/{record_type}/{record_id}")
+def api_save_tracker(record_type: str, record_id: int, request: TrackerRequest) -> dict:
+    try:
+        return save_tracker(
+            record_type,
+            record_id,
+            request.status,
+            note=request.note,
+            is_favorite=request.is_favorite,
+            next_action_at=request.next_action_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/api/tracker/{record_type}/{record_id}")
+def api_remove_tracker(record_type: str, record_id: int) -> dict:
+    try:
+        return {"removed": remove_tracker(record_type, record_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/jobs/{job_id}")

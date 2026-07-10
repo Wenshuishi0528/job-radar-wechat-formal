@@ -16,7 +16,7 @@ export ENABLE_WEB_SEARCH_IMPORT="${ENABLE_WEB_SEARCH_IMPORT:-1}"
 export ENABLE_SOGOU_DISCOVERY="${ENABLE_SOGOU_DISCOVERY:-1}"
 export SOGOU_REQUEST_DELAY_SECONDS="${SOGOU_REQUEST_DELAY_SECONDS:-2.0}"
 export WEB_SEARCH_REQUEST_DELAY_SECONDS="${WEB_SEARCH_REQUEST_DELAY_SECONDS:-1.0}"
-export JOB_RADAR_USER_AGENT="${JOB_RADAR_USER_AGENT:-JobRadar/0.7 personal-local-use no-login-cookie contact=operator}"
+export JOB_RADAR_USER_AGENT="${JOB_RADAR_USER_AGENT:-JobRadar/0.8 personal-local-use no-login-cookie contact=operator}"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "Python 3 is required. Install Python 3 first, then run this file again."

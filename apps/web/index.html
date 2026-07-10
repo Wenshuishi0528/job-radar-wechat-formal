@@ -36,7 +36,9 @@
           <input id="query" value="秋招" placeholder="秋招 / 公司 / 岗位 / 专业" autocomplete="off" />
         </label>
 
-        <div class="field-grid">
+        <details id="advancedFilters" class="advanced-filters" open>
+          <summary>更多筛选</summary>
+          <div class="field-grid advanced-filter-content">
           <label class="field">
             <span>城市</span>
             <input id="city" placeholder="北京 / 上海" autocomplete="off" />
@@ -54,6 +56,8 @@
               <option value="校招">校园招聘</option>
               <option value="春招">春招</option>
               <option value="实习">实习</option>
+              <option value="补录">补录</option>
+              <option value="公开招聘">公开招聘</option>
             </select>
           </label>
           <label class="field">
@@ -65,6 +69,7 @@
               <option value="国企">国企</option>
               <option value="民企">民企</option>
               <option value="外企">外企</option>
+              <option value="事业单位">事业单位</option>
             </select>
           </label>
           <label class="field">
@@ -78,7 +83,28 @@
               <option value="半导体">半导体</option>
               <option value="通信">通信</option>
               <option value="游戏">游戏</option>
+              <option value="航空航天">航空航天</option>
+              <option value="教育">教育科研</option>
+              <option value="制造">先进制造</option>
             </select>
+          </label>
+          <label class="field">
+            <span>岗位方向</span>
+            <select id="jobFamily">
+              <option value="">不限</option>
+              <option value="技术">技术 / 研发</option>
+              <option value="产品">产品</option>
+              <option value="运营">运营</option>
+              <option value="市场">市场 / 营销</option>
+              <option value="金融">金融</option>
+              <option value="职能">职能</option>
+              <option value="教育">教育</option>
+              <option value="管培生">管培生</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>专业</span>
+            <input id="major" placeholder="计算机 / 电气" autocomplete="off" />
           </label>
           <label class="field">
             <span>最低来源</span>
@@ -89,12 +115,27 @@
               <option value="S">只看 S</option>
             </select>
           </label>
-        </div>
+          <label class="field">
+            <span>投递状态</span>
+            <select id="trackerStatus">
+              <option value="">不限</option>
+              <option value="saved">已收藏</option>
+              <option value="preparing">准备中</option>
+              <option value="applied">已投递</option>
+              <option value="assessment">测评 / 笔试</option>
+              <option value="interview">面试</option>
+              <option value="offer">Offer</option>
+              <option value="rejected">未通过</option>
+              <option value="withdrawn">已放弃</option>
+            </select>
+          </label>
+          </div>
 
-        <label class="check-row">
-          <input id="includeExpired" type="checkbox" />
-          <span>显示已截止项目</span>
-        </label>
+          <label class="check-row">
+            <input id="includeExpired" type="checkbox" />
+            <span>显示已截止项目</span>
+          </label>
+        </details>
 
         <button id="searchButton" class="primary-button" type="submit">搜索并刷新</button>
         <p id="searchStatus" class="search-status" role="status">准备就绪</p>
@@ -110,9 +151,9 @@
           <label class="field">
             <span>搜索通道</span>
             <select id="searchProvider">
-              <option value="google" selected>Google 招聘资讯</option>
+              <option value="google">Google 招聘资讯</option>
               <option value="both">Google + Bing</option>
-              <option value="all">Google + Bing + 搜狗</option>
+              <option value="all" selected>Google + Bing + 搜狗</option>
               <option value="bing">Bing</option>
               <option value="sogou">搜狗微信</option>
             </select>
@@ -142,8 +183,8 @@
             <span>最多发现</span>
             <select id="maxResults">
               <option value="20">20 条</option>
-              <option value="50" selected>50 条</option>
-              <option value="100">100 条</option>
+              <option value="50">50 条</option>
+              <option value="100" selected>100 条</option>
             </select>
           </label>
         </div>
@@ -156,6 +197,14 @@
 
       <details class="settings-section settings-details">
         <summary>个人匹配设置</summary>
+        <label class="field field-wide">
+          <span>简历文本（仅本机处理）</span>
+          <textarea id="resumeText" placeholder="粘贴简历内容，或选择 TXT / Markdown 文件"></textarea>
+        </label>
+        <label class="field field-wide compact-file-field">
+          <span>读取简历文本文件</span>
+          <input id="resumeFile" type="file" accept=".txt,.md,text/plain,text/markdown" />
+        </label>
         <div class="field-grid profile-grid">
           <label class="field">
             <span>毕业年月</span>
@@ -194,7 +243,12 @@
           <span>目标城市</span>
           <input id="targetCities" value="上海,北京" />
         </label>
-        <button id="runMatch" type="button" class="secondary-button full-width">按画像匹配具体岗位</button>
+        <label class="field field-wide">
+          <span>目标岗位方向</span>
+          <input id="targetJobFamilies" value="技术" placeholder="技术,产品,运营" />
+        </label>
+        <button id="runResumeMatch" type="button" class="primary-button full-width">按简历匹配全部机会</button>
+        <button id="runMatch" type="button" class="text-action full-width">仅检查具体岗位资格</button>
       </details>
 
       <details class="settings-section settings-details">
@@ -219,16 +273,20 @@
         </div>
         <div class="view-tabs" role="tablist" aria-label="结果视图">
           <button class="view-tab active" type="button" role="tab" aria-selected="true" data-view="opportunities">网申机会</button>
+          <button class="view-tab" type="button" role="tab" aria-selected="false" data-view="tracker">投递进展</button>
           <button class="view-tab" type="button" role="tab" aria-selected="false" data-view="articles">公众号文章</button>
         </div>
       </div>
 
-      <div class="preset-bar" aria-label="快速视图">
-        <button type="button" data-preset="latest">24h 最新</button>
-        <button id="autumnPreset" type="button" data-preset="autumn">秋招</button>
-        <button type="button" data-preset="soe">国企央企</button>
-        <button type="button" data-preset="intern">实习</button>
-        <button type="button" data-preset="all">全部</button>
+      <div class="table-action-bar">
+        <div class="preset-bar" aria-label="快速视图">
+          <button type="button" data-preset="latest">24h 最新</button>
+          <button id="autumnPreset" type="button" data-preset="autumn">秋招</button>
+          <button type="button" data-preset="soe">国企央企</button>
+          <button type="button" data-preset="intern">实习</button>
+          <button type="button" data-preset="all">全部</button>
+        </div>
+        <button id="exportCsv" type="button" class="secondary-button export-button">导出 CSV</button>
       </div>
 
       <section id="opportunitiesView" class="result-view active" role="tabpanel">
@@ -242,6 +300,7 @@
               <col class="col-location" />
               <col class="col-deadline" />
               <col class="col-source" />
+              <col class="col-progress" />
               <col class="col-actions" />
             </colgroup>
             <thead>
@@ -253,6 +312,7 @@
                 <th scope="col">地点</th>
                 <th scope="col" data-sort-column="deadline"><button class="sort-button" type="button" data-sort="deadline">截止</button></th>
                 <th scope="col" data-sort-column="source_level"><button class="sort-button" type="button" data-sort="source_level">来源</button></th>
+                <th scope="col">进展</th>
                 <th scope="col">操作</th>
               </tr>
             </thead>
@@ -262,6 +322,19 @@
             <h3>暂无匹配机会</h3>
             <p>调整筛选后重新搜索，或开启联网更新。</p>
           </div>
+        </div>
+        <div class="table-footer" aria-label="分页">
+          <span id="pagerSummary">第 1 页</span>
+          <label class="page-size-control">每页
+            <select id="pageSize">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+          <button id="previousPage" type="button" class="secondary-button">上一页</button>
+          <button id="nextPage" type="button" class="secondary-button">下一页</button>
         </div>
       </section>
 
@@ -292,6 +365,48 @@
       <button id="closeDialog" type="button" class="text-button">关闭</button>
     </div>
     <div id="detailContent"></div>
+  </dialog>
+
+  <dialog id="trackerDialog">
+    <div class="dialog-header">
+      <div>
+        <p class="section-kicker">APPLICATION TRACKER</p>
+        <h2 id="trackerDialogTitle">投递记录</h2>
+      </div>
+      <button id="closeTrackerDialog" type="button" class="text-button">关闭</button>
+    </div>
+    <form id="trackerForm" class="tracker-form">
+      <label class="field">
+        <span>当前进展</span>
+        <select id="trackerDialogStatus">
+          <option value="saved">收藏</option>
+          <option value="preparing">准备中</option>
+          <option value="applied">已投递</option>
+          <option value="assessment">测评 / 笔试</option>
+          <option value="interview">面试</option>
+          <option value="offer">Offer</option>
+          <option value="rejected">未通过</option>
+          <option value="withdrawn">已放弃</option>
+        </select>
+      </label>
+      <label class="check-row tracker-favorite-row">
+        <input id="trackerFavorite" type="checkbox" />
+        <span>加入收藏</span>
+      </label>
+      <label class="field">
+        <span>下一步日期</span>
+        <input id="trackerNextAction" type="date" />
+      </label>
+      <label class="field">
+        <span>备注</span>
+        <textarea id="trackerNote" placeholder="联系人、测评时间、面试安排或待办事项"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button id="deleteTracker" type="button" class="danger-button">删除记录</button>
+        <button type="submit" class="primary-button">保存进展</button>
+      </div>
+      <p id="trackerDialogStatusText" class="search-status" role="status"></p>
+    </form>
   </dialog>
 
   <script src="/assets/app.js"></script>

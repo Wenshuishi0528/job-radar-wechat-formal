@@ -56,10 +56,14 @@ CREATE TABLE IF NOT EXISTS campaigns (
     overseas_grad_end TEXT,
     accepts_overseas INTEGER,
     degree_min TEXT NOT NULL DEFAULT 'bachelor',
+    cities_json TEXT NOT NULL DEFAULT '[]',
+    job_families_json TEXT NOT NULL DEFAULT '[]',
+    majors_json TEXT NOT NULL DEFAULT '[]',
     application_rules TEXT,
     apply_url TEXT,
     source_url TEXT,
     source_level TEXT NOT NULL DEFAULT 'C',
+    source_published_at TEXT,
     last_verified_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -140,6 +144,20 @@ CREATE TABLE IF NOT EXISTS change_events (
     new_value TEXT,
     detected_at TEXT NOT NULL,
     source_url TEXT
+);
+
+CREATE TABLE IF NOT EXISTS application_tracker (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL,
+    record_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'saved',
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
+    applied_at TEXT,
+    next_action_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(record_type, record_id)
 );
 
 
@@ -285,7 +303,23 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_campaigns_cohort ON campaigns(target_cohort);
 CREATE INDEX IF NOT EXISTS idx_campaigns_deadline ON campaigns(deadline);
 CREATE INDEX IF NOT EXISTS idx_signals_detected_at ON signals(detected_at);
+CREATE INDEX IF NOT EXISTS idx_tracker_status ON application_tracker(status, updated_at);
 """
+
+
+MIGRATION_COLUMNS = {
+    "campaigns": {
+        "cities_json": "TEXT NOT NULL DEFAULT '[]'",
+        "job_families_json": "TEXT NOT NULL DEFAULT '[]'",
+        "majors_json": "TEXT NOT NULL DEFAULT '[]'",
+        "source_published_at": "TEXT",
+    },
+    "application_tracker": {
+        "is_favorite": "INTEGER NOT NULL DEFAULT 0",
+        "applied_at": "TEXT",
+        "next_action_at": "TEXT",
+    },
+}
 
 
 def db_path() -> Path:
@@ -307,4 +341,9 @@ def get_connection() -> sqlite3.Connection:
 def init_db() -> None:
     with get_connection() as conn:
         conn.executescript(SCHEMA)
+        for table, columns in MIGRATION_COLUMNS.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for name, definition in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
         conn.commit()
